@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#12151a" />
+    <title>ClipDock · 视频下载工作台</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/styles.css" />
+    <style>.notice a{display:inline-block;margin-top:5px;color:#9b672b;font:600 10px 'Manrope','PingFang SC',sans-serif;text-decoration:none}.notice a:hover{text-decoration:underline}</style>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand"><span class="brand-mark">C</span><span>ClipDock</span><span class="brand-beta">BETA</span></div>
+        <nav class="nav" aria-label="主导航">
+          <button class="nav-item active" data-view="downloader"><span class="nav-icon">↓</span><span>下载器</span></button>
+          <button class="nav-item" data-view="history"><span class="nav-icon">◷</span><span>下载记录</span><span class="nav-count" id="historyCount">0</span></button>
+        </nav>
+        <div class="sidebar-bottom">
+          <div class="privacy-note"><span class="status-dot"></span><div><strong>本地运行</strong><small>链接不会离开你的设备</small></div></div>
+          <div class="sidebar-version">v1.0.0 <span>·</span> MIT License</div>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar"><div class="breadcrumb"><span>工作台</span><span class="slash">/</span><strong id="pageTitle">下载器</strong></div><div class="top-actions"><button class="icon-button" title="帮助" aria-label="帮助">?</button><button class="avatar" title="本地模式">L</button></div></header>
+
+        <section class="view" id="downloaderView">
+          <div class="page-intro"><div><p class="eyebrow">VIDEO DOWNLOADER <span></span></p><h1>把链接，变成文件。</h1><p class="intro-copy">从抖音和微信视频号保存你有权使用的内容。粘贴链接，选择格式，开始处理。</p></div><div class="shortcut-hint"><kbd>⌘</kbd><kbd>V</kbd><span>粘贴链接</span></div></div>
+          <div class="workspace-grid">
+            <div class="primary-column">
+              <section class="panel input-panel"><div class="panel-head"><div><h2>新建下载</h2><p>支持分享页链接与可访问的媒体直链</p></div><span class="secure-badge"><span class="lock">⌁</span> 安全处理</span></div>
+                <div class="platform-tabs" role="tablist"><button class="platform-tab active" data-platform="douyin"><span class="platform-logo douyin-logo">♪</span><span>抖音</span></button><button class="platform-tab" data-platform="channels"><span class="platform-logo channels-logo">◉</span><span>微信视频号</span></button></div>
+                <form id="parseForm"><label for="urlInput">视频链接</label><div class="url-row"><div class="url-input-wrap"><span class="link-icon">↗</span><input id="urlInput" type="url" autocomplete="off" placeholder="粘贴抖音或视频号链接…" required /><button type="button" class="clear-button" id="clearUrl" aria-label="清空链接">×</button></div><button class="primary-button" type="submit" id="parseButton"><span class="button-symbol">✦</span><span>提取信息</span></button></div><div class="input-foot"><span id="inputHint">例如：https://v.douyin.com/…</span><span class="char-count" id="charCount">0 / 2000</span></div></form>
+                <div class="example-row"><span>快速试用</span><button type="button" class="example-link" data-example="https://channels.weixin.qq.com/finder-preview/pages/sph?id=ApRH9VNkhv">微信视频号示例链接 <span>↗</span></button></div>
+              </section>
+
+              <section class="panel result-panel" id="resultPanel"><div class="empty-state" id="emptyState"><div class="empty-glyph">◌</div><h3>等待一个链接</h3><p>提取后会在这里显示封面、作者与可下载格式。</p></div><div class="result-content hidden" id="resultContent"><div class="result-head"><div><p class="eyebrow">READY TO DOWNLOAD <span></span></p><h2 id="resultTitle">视频信息</h2></div><span class="platform-chip" id="resultPlatform">抖音</span></div><div class="media-preview"><div class="preview-art" id="previewArt"><div class="preview-noise"></div><span class="preview-play">▶</span><span class="preview-label" id="previewLabel">VIDEO</span></div><div class="media-details"><div class="detail-line"><span>作者</span><strong id="resultAuthor">--</strong></div><div class="detail-line"><span>时长</span><strong id="resultDuration">--:--</strong></div><div class="detail-line"><span>来源</span><strong class="source-text" id="resultSource">--</strong></div><div class="notice" id="resultNotice"><span>i</span><div><p>分享页受登录态保护。请打开原页面完成扫码，再复制媒体直链。</p><a id="openSource" href="#" target="_blank" rel="noreferrer">打开原页面 ↗</a></div></div></div></div><div class="download-controls"><div><label for="qualitySelect">下载质量</label><select id="qualitySelect"><option value="original">原画 · MP4</option><option value="1080">1080p · MP4</option><option value="720">720p · MP4</option></select></div><button class="download-button" id="downloadButton" disabled><span>↓</span><span>下载视频</span></button></div></div></section>
+            </div>
+            <aside class="secondary-column"><section class="panel tips-panel"><div class="panel-head compact"><div><h2>使用提示</h2><p>让每次下载都顺利</p></div><span class="tip-icon">✳</span></div><ol class="tips-list"><li><span>01</span><div><strong>复制分享链接</strong><p>在抖音或微信视频号中点击分享 → 复制链接。</p></div></li><li><span>02</span><div><strong>粘贴并提取</strong><p>ClipDock 会先识别平台和链接类型。</p></div></li><li><span>03</span><div><strong>保存到本地</strong><p>仅下载你拥有或获授权使用的内容。</p></div></li></ol></section><section class="panel status-panel"><div class="panel-head compact"><div><h2>解析状态</h2><p>当前服务运行情况</p></div><span class="pulse"></span></div><div class="status-row"><span>链接检测</span><strong class="status-ok">在线</strong></div><div class="status-row"><span>媒体代理</span><strong class="status-local">本地</strong></div><div class="status-row"><span>队列任务</span><strong id="queueStatus">空闲</strong></div></section></aside>
+          </div>
+        </section>
+
+        <section class="view hidden" id="historyView"><div class="page-intro compact-intro"><div><p class="eyebrow">DOWNLOAD LOG <span></span></p><h1>下载记录</h1><p class="intro-copy">最近处理过的链接会保存在当前浏览器中。</p></div><button class="ghost-button" id="clearHistory"><span>×</span> 清空记录</button></div><section class="panel history-panel"><div id="historyList" class="history-list"></div><div id="historyEmpty" class="history-empty"><div class="empty-glyph">◷</div><h3>还没有下载记录</h3><p>完成一次下载后，记录会出现在这里。</p></div></section></section>
+        <footer class="footer"><span>ClipDock 是本地工具，不存储你的链接或视频。</span><span>仅限个人学习与获得授权的内容</span></footer>
+      </main>
+    </div>
+    <div class="toast" id="toast" role="status"></div>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

@@ -1,0 +1,4 @@
+{
+  "desc": "ClipDock 视频下载小程序",
+  "rules": [{ "action": "allow", "page": "*" }]
+}

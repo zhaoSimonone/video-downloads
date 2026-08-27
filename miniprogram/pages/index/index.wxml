@@ -1,0 +1,37 @@
+<view class="page">
+  <view class="topbar">
+    <view class="brand"><view class="brand-mark">C</view><text>ClipDock</text><text class="beta">BETA</text></view>
+    <view class="local-pill"><view class="dot"></view>本地模式</view>
+  </view>
+
+  <scroll-view class="scroll" scroll-y="{{true}}" enhanced="{{true}}" show-scrollbar="{{false}}">
+    <view class="hero">
+      <view class="eyebrow">VIDEO DOWNLOADER</view>
+      <view class="title">把链接，变成文件。</view>
+      <view class="subtitle">抖音 · 微信视频号</view>
+    </view>
+
+    <view class="card input-card">
+      <view class="section-head"><view><view class="section-title">新建下载</view><view class="section-sub">分享页或 MP4 媒体直链</view></view><view class="secure">⌁ 安全处理</view></view>
+      <view class="tabs">
+        <button class="tab {{platform == 'douyin' ? 'active' : ''}}" data-platform="douyin" bindtap="selectPlatform"><text class="logo douyin">♪</text>抖音</button>
+        <button class="tab {{platform == 'channels' ? 'active' : ''}}" data-platform="channels" bindtap="selectPlatform"><text class="logo channels">◉</text>微信视频号</button>
+      </view>
+      <view class="field-label">视频链接</view>
+      <view class="input-wrap"><text class="link-symbol">↗</text><input class="url-input" value="{{url}}" bindinput="handleInput" placeholder="粘贴抖音或视频号链接…" confirm-type="done" bindconfirm="parse"/><button wx:if="{{url}}" class="clear" bindtap="clearUrl">×</button></view>
+      <view class="input-meta"><text>{{hint}}</text><text>{{url.length}} / 2000</text></view>
+      <button class="primary {{loading ? 'loading' : ''}}" bindtap="parse" loading="{{loading}}">✦ {{loading ? '识别中…' : '提取信息'}}</button>
+      <button class="example" bindtap="useExample">快速试用　微信视频号示例链接 ↗</button>
+    </view>
+
+    <view wx:if="{{result}}" class="card result-card">
+      <view class="result-head"><view><view class="eyebrow">{{result.direct ? 'READY TO DOWNLOAD' : 'AUTHORIZATION NEEDED'}}</view><view class="result-title">{{result.title}}</view></view><view class="platform-chip">{{result.platformName}}</view></view>
+      <view class="preview"><view class="preview-art"><text class="play">▶</text><text class="preview-label">{{result.platformName}}</text></view><view class="details"><view class="detail"><text>作者</text><text class="value">{{result.author}}</text></view><view class="detail"><text>时长</text><text class="value">{{result.duration}}</text></view><view class="detail"><text>来源</text><text class="value source">{{result.source}}</text></view></view></view>
+      <view wx:if="{{!result.direct}}" class="notice"><text class="info">i</text><view><text>{{result.message}}</text><button class="open-link" bindtap="copySource">复制原链接 ↗</button></view></view>
+      <view class="download-row"><picker mode="selector" range="{{qualities}}" value="{{qualityIndex}}" bindchange="selectQuality"><view class="quality">{{qualities[qualityIndex]}}　⌄</view></picker><button class="download {{!result.direct ? 'disabled' : ''}}" disabled="{{!result.direct || downloading}}" bindtap="download">↓　{{downloading ? '下载中…' : '下载视频'}}</button></view>
+    </view>
+
+    <view wx:else class="card empty-card"><view class="empty-icon">◌</view><view class="empty-title">等待一个链接</view><view class="empty-sub">提取后会在这里显示视频信息和下载选项。</view></view>
+    <view class="legal">ClipDock 不存储链接或视频 · 仅限个人学习与获得授权的内容</view>
+  </scroll-view>
+</view>

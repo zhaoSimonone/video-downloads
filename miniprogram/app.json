@@ -1,0 +1,14 @@
+{
+  "pages": [
+    "pages/index/index"
+  ],
+  "window": {
+    "navigationBarTitleText": "ClipDock",
+    "navigationBarBackgroundColor": "#12161a",
+    "navigationBarTextStyle": "white",
+    "backgroundColor": "#f3f4f1",
+    "backgroundTextStyle": "light"
+  },
+  "style": "v2",
+  "sitemapLocation": "sitemap.json"
+}
