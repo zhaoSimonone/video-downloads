@@ -30,11 +30,13 @@ final class ManagedProcess {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKDownloadDelegate {
     private var window: NSWindow!
     private var webView: WKWebView!
     private var managedProcesses: [ManagedProcess] = []
+    private var downloadDestinations: [ObjectIdentifier: URL] = [:]
     private var shuttingDown = false
+    private var keyMonitor: Any?
     private let fileManager = FileManager.default
 
     private var supportDirectory: URL {
@@ -55,6 +57,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         shuttingDown = true
         managedProcesses.reversed().forEach { $0.stop() }
         managedProcesses.removeAll()
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        keyMonitor = nil
         return .terminateNow
     }
 
@@ -63,6 +67,78 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         shuttingDown = true
         managedProcesses.reversed().forEach { $0.stop() }
         managedProcesses.removeAll()
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        keyMonitor = nil
+    }
+
+    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        if let response = navigationResponse.response as? HTTPURLResponse,
+           response.value(forHTTPHeaderField: "Content-Disposition")?.lowercased().contains("attachment") == true {
+            decisionHandler(.download)
+            return
+        }
+        decisionHandler(.allow)
+    }
+
+    func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
+        download.delegate = self
+    }
+
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        guard let url = navigationAction.request.url, url.scheme == "clipdock" else {
+            decisionHandler(.allow)
+            return
+        }
+        if url.host == "open-downloads" {
+            openDownloadsDirectory()
+        } else if url.host == "reveal-download" {
+            let name = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "name" })?.value
+            if let name, name == URL(fileURLWithPath: name).lastPathComponent, !name.isEmpty {
+                let destination = downloadsDirectory.appendingPathComponent(name)
+                if fileManager.fileExists(atPath: destination.path) {
+                    NSWorkspace.shared.activateFileViewerSelecting([destination])
+                } else {
+                    openDownloadsDirectory()
+                }
+            } else {
+                openDownloadsDirectory()
+            }
+        }
+        decisionHandler(.cancel)
+    }
+
+    func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) {
+        let downloadsDirectory = fileManager.urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? supportDirectory.appendingPathComponent("Downloads", isDirectory: true)
+        try? fileManager.createDirectory(at: downloadsDirectory, withIntermediateDirectories: true)
+        let sanitized = suggestedFilename.replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "\\", with: "_")
+        let baseName = sanitized.isEmpty ? "clipdock-video.mp4" : sanitized
+        var destination = downloadsDirectory.appendingPathComponent(baseName)
+        var suffix = 1
+        while fileManager.fileExists(atPath: destination.path) {
+            let url = downloadsDirectory.appendingPathComponent(baseName)
+            let extensionPart = url.pathExtension.isEmpty ? "mp4" : url.pathExtension
+            destination = downloadsDirectory.appendingPathComponent("\(url.deletingPathExtension().lastPathComponent)-\(suffix).\(extensionPart)")
+            suffix += 1
+        }
+        downloadDestinations[ObjectIdentifier(download)] = destination
+        completionHandler(destination)
+    }
+
+    func downloadDidFinish(_ download: WKDownload) {
+        NSLog("ClipDock download finished")
+        guard let destination = downloadDestinations.removeValue(forKey: ObjectIdentifier(download)) else { return }
+        DispatchQueue.main.async {
+            NSWorkspace.shared.activateFileViewerSelecting([destination])
+        }
+    }
+
+    func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
+        downloadDestinations.removeValue(forKey: ObjectIdentifier(download))
+        DispatchQueue.main.async { [weak self] in
+            self?.showError("下载失败：\n\(error.localizedDescription)")
+        }
     }
 
     private func configureWindow() {
@@ -86,6 +162,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         window.setFrameAutosaveName("ClipDockMainWindow")
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            self?.handleClipboardShortcut(event) ?? event
+        }
+    }
+
+    private func handleClipboardShortcut(_ event: NSEvent) -> NSEvent? {
+        guard window?.isKeyWindow == true else { return event }
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard modifiers.contains(.command) || modifiers.contains(.control) else { return event }
+        guard let key = event.charactersIgnoringModifiers?.lowercased(), key == "v" || key == "c" || key == "q" else { return event }
+        if key == "q" {
+            NSApp.terminate(nil)
+            return nil
+        }
+        if key == "v" {
+            guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { return nil }
+            let encoded = (try? JSONEncoder().encode(text)).flatMap { String(data: $0, encoding: .utf8) } ?? "\"\""
+            webView.evaluateJavaScript("""
+            (() => { const input = document.getElementById('urlInput'); if (!input) return; input.focus(); const start = input.selectionStart ?? input.value.length; const end = input.selectionEnd ?? input.value.length; input.value = input.value.slice(0, start) + \(encoded) + input.value.slice(end); input.selectionStart = input.selectionEnd = start + \(encoded).length; input.dispatchEvent(new Event('input', { bubbles: true })); })();
+            """)
+            return nil
+        }
+        webView.evaluateJavaScript("""
+        (() => { const input = document.getElementById('urlInput'); if (!input || document.activeElement !== input || input.selectionStart === input.selectionEnd) return ''; return input.value.slice(input.selectionStart, input.selectionEnd); })();
+        """) { result, _ in
+            guard let text = result as? String, !text.isEmpty else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+        }
+        return nil
+    }
+
+    private var downloadsDirectory: URL {
+        fileManager.urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? supportDirectory.appendingPathComponent("Downloads", isDirectory: true)
+    }
+
+    private func openDownloadsDirectory() {
+        NSWorkspace.shared.open(downloadsDirectory)
     }
 
     private func prepareRuntime(completion: @escaping () -> Void) {
