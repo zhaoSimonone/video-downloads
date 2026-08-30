@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { createReadStream, createWriteStream, constants as fsConstants } from 'node:fs';
-import { access, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -64,6 +64,7 @@ function platformFor(url) {
   if (host.includes('douyin') || host.includes('iesdouyin')) return 'douyin';
   if (host.includes('weixin.qq.com') || host.includes('channels.weixin')) return 'channels';
   if (isInstagramHost(host)) return 'instagram';
+  if (isTikTokHost(host)) return 'tiktok';
   return 'unknown';
 }
 
@@ -77,6 +78,16 @@ function isInstagramShareUrl(url) {
   return /^\/(?:reel|reels|p)\/[A-Za-z0-9_-]+\/?$/i.test(url.pathname);
 }
 
+function isTikTokHost(hostname) {
+  const host = String(hostname || '').toLowerCase();
+  return host === 'tiktok.com' || host.endsWith('.tiktok.com');
+}
+
+function isTikTokShareUrl(url) {
+  if (!isTikTokHost(url.hostname)) return false;
+  return /^\/@[A-Za-z0-9._-]+\/video\/\d+\/?$/i.test(url.pathname) || /^\/t\/[A-Za-z0-9]+\/?$/i.test(url.pathname);
+}
+
 function isInstagramMediaUrl(raw) {
   try {
     const url = raw instanceof URL ? raw : new URL(String(raw));
@@ -84,6 +95,22 @@ function isInstagramMediaUrl(raw) {
     return url.protocol === 'https:' && (
       host === 'cdninstagram.com' || host.endsWith('.cdninstagram.com') ||
       host === 'fbcdn.net' || host.endsWith('.fbcdn.net')
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isTikTokMediaUrl(raw) {
+  try {
+    const url = raw instanceof URL ? raw : new URL(String(raw));
+    const host = url.hostname.toLowerCase();
+    return url.protocol === 'https:' && (
+      host === 'tiktokcdn.com' || host.endsWith('.tiktokcdn.com') || host.endsWith('.tiktok.com') ||
+      host === 'tiktokcdn-us.com' || host.endsWith('.tiktokcdn-us.com') ||
+      host.endsWith('.tiktokcdn-in.com') || host.endsWith('.tiktokcdn-eu.com') ||
+      host.endsWith('.ibytedtos.com') || host.endsWith('.muscdn.com') ||
+      host.endsWith('.akamaized.net') || host.endsWith('.byteoversea.com')
     );
   } catch {
     return false;
@@ -218,6 +245,18 @@ function safeInstagramHeaders(headers = {}) {
   return result;
 }
 
+function safeTikTokHeaders(headers = {}) {
+  const allowed = new Set(['accept', 'accept-language', 'cookie', 'origin', 'referer', 'user-agent']);
+  const result = {};
+  for (const [key, value] of Object.entries(headers)) {
+    const normalized = String(key).toLowerCase();
+    if (allowed.has(normalized) && typeof value === 'string' && value.length <= 16000) {
+      result[normalized] = value;
+    }
+  }
+  return result;
+}
+
 function instagramTrackMetadata(rawUrl) {
   try {
     const url = new URL(rawUrl);
@@ -245,6 +284,25 @@ function instagramMediaCandidate(url, response, requestHeaders = {}) {
     size: Number(response?.headers?.['content-length'] || response?.headers?.['Content-Length'] || 0),
     seenAt: Date.now(),
     headers: safeInstagramHeaders(requestHeaders),
+  };
+}
+
+function tiktokMediaCandidate(url, response, requestHeaders = {}) {
+  const mimeType = String(response?.mimeType || '').toLowerCase();
+  const resourceType = String(response?.resourceType || '').toLowerCase();
+  const looksLikeVideo = mimeType.startsWith('video/') || /\.(?:mp4|m4v|webm)(?:$|[?&])/i.test(url);
+  if (!isTikTokMediaUrl(url) || (!looksLikeVideo && resourceType !== 'media')) return null;
+  return {
+    url,
+    mimeType: mimeType || 'video/mp4',
+    kind: 'video',
+    resourceType,
+    status: Number(response?.status || 0),
+    size: Number(response?.headers?.['content-length'] || response?.headers?.['Content-Length'] || 0),
+    seenAt: Date.now(),
+    headers: safeTikTokHeaders(requestHeaders),
+    body: null,
+    bodyPromise: null,
   };
 }
 
@@ -291,6 +349,36 @@ function chooseInstagramAudio(candidates, videoCandidate) {
   return [...candidates.values()]
     .filter(item => item !== videoCandidate && item.kind === 'audio' && item.status >= 200 && item.status < 300 && item.size >= 8 * 1024)
     .sort((a, b) => Math.abs((a.seenAt || 0) - (videoCandidate.seenAt || 0)) - Math.abs((b.seenAt || 0) - (videoCandidate.seenAt || 0)) || b.size - a.size)[0] || null;
+}
+
+function choosePlayedTikTokMedia(candidates, playedVideos) {
+  const playable = playedVideos.filter(item => item.src);
+  if (!playable.length) return null;
+  const latestPlay = playable
+    .filter(item => item.visible || item.userGesture)
+    .sort((a, b) => Number(b.at || 0) - Number(a.at || 0))[0] || playable[playable.length - 1];
+  const nearby = [...candidates.values()]
+    .filter(item => item.kind === 'video' && item.status === 200 && item.finishedAt && item.size >= 100 * 1024)
+    .map(item => ({ item, distance: Math.abs((item.seenAt || item.finishedAt || 0) - (latestPlay.at || 0)) }))
+    .filter(entry => entry.item.seenAt && entry.distance <= 20000)
+    .sort((a, b) => a.distance - b.distance || b.item.size - a.item.size);
+  return nearby[0]?.item || null;
+}
+
+async function readCdpResponseBody(cdp, candidate, requestId) {
+  if (candidate.bodyPromise) return candidate.bodyPromise;
+  candidate.bodyPromise = cdp.send('Network.getResponseBody', { requestId }).then(async result => {
+    const encoded = Boolean(result?.base64Encoded);
+    const raw = String(result?.body || '');
+    if (!raw) return null;
+    const body = encoded ? Buffer.from(raw, 'base64') : Buffer.from(raw, 'utf8');
+    // Do not retain unexpectedly large responses in the server process.
+    if (body.length > 150 * 1024 * 1024) return null;
+    candidate.body = body;
+    candidate.bodySize = body.length;
+    return body;
+  }).catch(() => null);
+  return candidate.bodyPromise;
 }
 
 async function cdpJson(pathname, options = {}) {
@@ -430,6 +518,12 @@ async function startInstagramCapture(session) {
       if (message.method === 'Network.requestWillBeSent') {
         requests.set(params.requestId, params.request?.headers || {});
       }
+      if (message.method === 'Network.requestWillBeSentExtraInfo') {
+        const mergedHeaders = { ...(requests.get(params.requestId) || {}), ...(params.headers || {}) };
+        requests.set(params.requestId, mergedHeaders);
+        const candidate = session.candidates.get(params.requestId);
+        if (candidate) candidate.headers = safeInstagramHeaders(mergedHeaders);
+      }
       if (message.method === 'Network.responseReceived') {
         const response = params.response || {};
         const candidate = instagramMediaCandidate(response.url, {
@@ -486,6 +580,83 @@ async function startInstagramCapture(session) {
   }
 }
 
+async function startTikTokCapture(session) {
+  let cdp;
+  try {
+    const page = await newInstagramPage(session.source);
+    cdp = await connectCdp(page.webSocketDebuggerUrl);
+    session.socket = cdp.socket;
+    const requests = new Map();
+    cdp.socket.addEventListener('message', event => {
+      let message;
+      try { message = JSON.parse(String(event.data)); } catch { return; }
+      const params = message.params || {};
+      if (message.method === 'Network.requestWillBeSent') {
+        requests.set(params.requestId, params.request?.headers || {});
+      }
+      if (message.method === 'Network.requestWillBeSentExtraInfo') {
+        const mergedHeaders = { ...(requests.get(params.requestId) || {}), ...(params.headers || {}) };
+        requests.set(params.requestId, mergedHeaders);
+        const candidate = session.candidates.get(params.requestId);
+        if (candidate) candidate.headers = safeTikTokHeaders(mergedHeaders);
+      }
+      if (message.method === 'Network.responseReceived') {
+        const response = params.response || {};
+        const candidate = tiktokMediaCandidate(response.url, {
+          mimeType: response.mimeType,
+          resourceType: params.type,
+          status: response.status,
+          headers: response.headers,
+        }, requests.get(params.requestId));
+        if (candidate) session.candidates.set(params.requestId, candidate);
+      }
+      if (message.method === 'Network.loadingFinished') {
+        const candidate = session.candidates.get(params.requestId);
+        if (!candidate) return;
+        candidate.size = Math.max(candidate.size, Number(params.encodedDataLength || 0));
+        candidate.finishedAt = Date.now();
+        if (candidate.status === 200 && candidate.kind === 'video') {
+          void readCdpResponseBody(cdp, candidate, params.requestId);
+        }
+      }
+    });
+    await cdp.send('Network.enable');
+    await cdp.send('Page.enable');
+    await cdp.send('Runtime.enable');
+    await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: instagramPlaybackProbe });
+    await cdp.send('Page.bringToFront');
+    await cdp.send('Page.navigate', { url: session.source });
+    session.status = 'waiting';
+    session.message = '请在打开的 Chrome 页面中登录 TikTok，并点击目标视频播放一次';
+    const deadline = Date.now() + INSTAGRAM_CAPTURE_TIMEOUT_MS;
+    while (!session.media && Date.now() < deadline && !shuttingDown) {
+      const playback = await readInstagramPlayback(cdp);
+      const selected = choosePlayedTikTokMedia(session.candidates, playback.plays || []);
+      if (selected) {
+        // TikTok signs CDN URLs and may reject a later server-side request.
+        // Give Chrome a moment to expose the already-loaded response body so
+        // the download can be served without leaving the authenticated session.
+        if (selected.bodyPromise) await selected.bodyPromise;
+        session.media = selected;
+        session.status = 'captured';
+        session.message = '已捕获目标 TikTok 视频，可以下载';
+        break;
+      }
+      await delay(500);
+    }
+    if (!session.media && !shuttingDown) {
+      session.status = 'failed';
+      session.message = '未捕获到目标 TikTok 视频，请确认已登录，并点击目标视频播放后重试';
+    }
+  } catch (error) {
+    session.status = 'failed';
+    session.message = error.message || 'TikTok 捕获失败';
+  } finally {
+    try { cdp?.socket.close(); } catch {}
+    session.socket = null;
+  }
+}
+
 function captureResponse(session) {
   let media = null;
   if (session.media) {
@@ -522,12 +693,34 @@ function instagramTargetUrl(candidate) {
   return target;
 }
 
+function tiktokTargetUrl(candidate) {
+  const target = new URL(candidate.url);
+  if (!isTikTokMediaUrl(target)) throw new Error('捕获到的 TikTok 媒体地址不受支持');
+  return target;
+}
+
 function instagramCurlHeaders(headers = {}) {
   return Object.entries(headers).flatMap(([key, value]) => ['--header', `${key}: ${value}`]);
 }
 
 async function fetchInstagramCandidate(candidate, outputPath) {
-  const target = instagramTargetUrl(candidate);
+  return fetchMediaCandidate(candidate, outputPath, 'instagram');
+}
+
+async function fetchTikTokCandidate(candidate, outputPath) {
+  return fetchMediaCandidate(candidate, outputPath, 'tiktok');
+}
+
+async function fetchMediaCandidate(candidate, outputPath, platform) {
+  const target = platform === 'tiktok' ? tiktokTargetUrl(candidate) : instagramTargetUrl(candidate);
+  const label = platform === 'tiktok' ? 'TikTok' : 'Instagram';
+
+  if (platform === 'tiktok' && candidate.body?.length) {
+    await writeFile(outputPath, candidate.body);
+    if (!candidate.body.length) throw new Error(`${label} 媒体返回了空文件`);
+    return candidate.mimeType || 'video/mp4';
+  }
+
   let directError = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
@@ -536,12 +729,13 @@ async function fetchInstagramCandidate(candidate, outputPath) {
         signal: AbortSignal.timeout(60000),
         headers: candidate.headers,
       });
-      if (!upstream.ok || !upstream.body) throw new Error(`Instagram 媒体返回 ${upstream.status}`);
-      if (!isInstagramMediaUrl(upstream.url)) throw new Error('Instagram 媒体重定向到了不受支持的地址');
+      if (!upstream.ok || !upstream.body) throw new Error(`${label} 媒体返回 ${upstream.status}`);
+      const validUpstream = platform === 'tiktok' ? isTikTokMediaUrl(upstream.url) : isInstagramMediaUrl(upstream.url);
+      if (!validUpstream) throw new Error(`${label} 媒体重定向到了不受支持的地址`);
       if (upstream.status === 206) throw new Error('该视频需要分段下载，当前版本暂不支持');
       await pipeline(Readable.fromWeb(upstream.body), createWriteStream(outputPath));
       const outputStat = await stat(outputPath);
-      if (!outputStat.size) throw new Error('Instagram 媒体返回了空文件');
+      if (!outputStat.size) throw new Error(`${label} 媒体返回了空文件`);
       return upstream.headers.get('content-type') || candidate.mimeType || 'video/mp4';
     } catch (error) {
       directError = error;
@@ -570,18 +764,18 @@ async function fetchInstagramCandidate(candidate, outputPath) {
       child.once('error', reject);
       child.once('close', code => {
         if (code === 0) resolve();
-        else reject(new Error(`Instagram 代理读取失败（curl ${code}${stderr ? `：${stderr.trim()}` : ''}）`));
+        else reject(new Error(`${label} 代理读取失败（curl ${code}${stderr ? `：${stderr.trim()}` : ''}）`));
       });
     }).then(async () => {
       const outputStat = await stat(outputPath);
-      if (!outputStat.size) throw new Error('Instagram 代理返回了空文件');
+      if (!outputStat.size) throw new Error(`${label} 代理返回了空文件`);
     }).catch(async error => {
       await rm(outputPath, { force: true }).catch(() => {});
-      throw new Error(`${directError?.message || 'Instagram 媒体读取失败'}；代理回退也失败：${error.message || error}`);
+      throw new Error(`${directError?.message || `${label} 媒体读取失败`}；代理回退也失败：${error.message || error}`);
     });
     return candidate.mimeType || 'video/mp4';
   }
-  throw directError || new Error('Instagram 媒体读取失败');
+  throw directError || new Error(`${label} 媒体读取失败`);
 }
 
 async function readJsonBody(req) {
@@ -645,6 +839,60 @@ async function handleInstagramDownload(req, res, requestUrl) {
   } catch (error) {
     if (res.headersSent) res.destroy(error);
     else json(res, 502, { ok: false, error: error.message || 'Instagram 下载失败' });
+  } finally {
+    if (tempDir) await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function handleTikTokOpen(req, res) {
+  try {
+    const request = await readJsonBody(req);
+    const source = parseUrl(request.url).href;
+    if (!isTikTokShareUrl(new URL(source))) throw new Error('请输入 TikTok 视频链接');
+    const session = {
+      id: randomUUID(), source, platform: 'tiktok', status: 'starting', message: '正在启动 Chrome 捕获会话',
+      createdAt: Date.now(), candidates: new Map(), media: null, mediaAudio: null, socket: null,
+    };
+    instagramCaptures.set(session.id, session);
+    startTikTokCapture(session);
+    json(res, 200, captureResponse(session));
+  } catch (error) {
+    json(res, 400, { ok: false, error: error.message || 'TikTok 捕获启动失败' });
+  }
+}
+
+async function handleTikTokCapture(req, res, requestUrl) {
+  const id = String(requestUrl.searchParams.get('id') || '').trim();
+  const session = instagramCaptures.get(id);
+  if (!session || session.platform !== 'tiktok') return json(res, 404, { ok: false, error: 'TikTok 捕获任务不存在或已过期' });
+  json(res, 200, captureResponse(session));
+}
+
+async function handleTikTokDownload(req, res, requestUrl) {
+  let tempDir = null;
+  try {
+    const id = String(requestUrl.searchParams.get('id') || '').trim();
+    const session = instagramCaptures.get(id);
+    if (!session?.media || session.platform !== 'tiktok' || session.status !== 'captured') {
+      throw new Error('尚未捕获到 TikTok 视频，请先在 Chrome 中播放视频');
+    }
+    const filename = safeDownloadFilename(requestUrl.searchParams.get('filename'), 'tiktok-video.mp4');
+    tempDir = await mkdtemp(`${tmpdir()}/clipdock-tiktok-`);
+    const inputPath = `${tempDir}/source.mp4`;
+    const contentType = await fetchTikTokCandidate(session.media, inputPath);
+    if (!contentType.startsWith('video/') && contentType !== 'application/octet-stream') {
+      throw new Error('捕获到的地址不是 TikTok 视频文件');
+    }
+    const outputStat = await stat(inputPath);
+    res.writeHead(200, {
+      'content-type': contentType.startsWith('video/') ? contentType : 'video/mp4',
+      'content-disposition': `attachment; filename="${filename}"`,
+      'content-length': String(outputStat.size),
+    });
+    await pipeline(createReadStream(inputPath), res);
+  } catch (error) {
+    if (res.headersSent) res.destroy(error);
+    else json(res, 502, { ok: false, error: error.message || 'TikTok 下载失败' });
   } finally {
     if (tempDir) await rm(tempDir, { recursive: true, force: true }).catch(() => {});
   }
@@ -811,23 +1059,26 @@ function metadataFor(url, platform) {
   const isChannels = platform === 'channels';
   const isDouyin = platform === 'douyin';
   const isInstagram = platform === 'instagram';
-  const title = isChannels ? '微信视频号内容 · 待授权解析' : isDouyin ? '抖音内容 · 待解析' : isInstagram ? 'Instagram Reel · 待捕获' : '待解析的视频';
+  const isTikTok = platform === 'tiktok';
+  const title = isChannels ? '微信视频号内容 · 待授权解析' : isDouyin ? '抖音内容 · 待解析' : isInstagram ? 'Instagram Reel · 待捕获' : isTikTok ? 'TikTok 视频 · 待捕获' : '待解析的视频';
   const message = isDirectMedia(url)
     ? '检测到直链，可直接下载。'
     : (isInstagram
     ? '请点击“打开并捕获”，在已登录的 Chrome 页面中点击目标 Reel 播放一次。ClipDock 只接收当前可见视频的媒体请求，不保存 Cookie。'
+    : (isTikTok
+    ? '请点击“打开并捕获”，在已登录的 Chrome 页面中点击目标 TikTok 视频播放一次。ClipDock 只接收当前可见视频的媒体请求，不保存 Cookie。'
     : (isChannels && url.hostname === 'weixin.qq.com'
       ? '该微信短链接会跳转到视频号预览页，当前内容需要登录或扫码后才能获取媒体直链。'
-      : '平台分享页需要在已登录的浏览器会话中解析，请先在对应平台打开并复制可访问的媒体直链。'));
+      : '平台分享页需要在已登录的浏览器会话中解析，请先在对应平台打开并复制可访问的媒体直链。')));
   return {
     title,
-    author: isChannels ? '视频号创作者' : isDouyin ? '抖音创作者' : isInstagram ? 'Instagram 创作者' : '未知创作者',
+    author: isChannels ? '视频号创作者' : isDouyin ? '抖音创作者' : isInstagram ? 'Instagram 创作者' : isTikTok ? 'TikTok 创作者' : '未知创作者',
     duration: '--:--',
     thumbnail: null,
     platform,
     direct: isDirectMedia(url),
     requiresSession: !isDirectMedia(url),
-    captureRequired: isInstagram && !isDirectMedia(url),
+    captureRequired: (isInstagram || isTikTok) && !isDirectMedia(url),
     message
   };
 }
@@ -869,6 +1120,11 @@ async function handleParse(req, res) {
       return;
     }
     if (platform === 'instagram' && isInstagramShareUrl(url)) {
+      const metadata = metadataFor(url, platform);
+      json(res, 200, { ok: true, source: url.href, pageSource: url.href, ...metadata });
+      return;
+    }
+    if (platform === 'tiktok' && isTikTokShareUrl(url)) {
       const metadata = metadataFor(url, platform);
       json(res, 200, { ok: true, source: url.href, pageSource: url.href, ...metadata });
       return;
@@ -917,6 +1173,9 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'POST' && requestUrl.pathname === '/api/instagram/open') return handleInstagramOpen(req, res);
   if (req.method === 'GET' && requestUrl.pathname === '/api/instagram/capture') return handleInstagramCapture(req, res, requestUrl);
   if (req.method === 'GET' && requestUrl.pathname === '/api/instagram/download') return handleInstagramDownload(req, res, requestUrl);
+  if (req.method === 'POST' && requestUrl.pathname === '/api/tiktok/open') return handleTikTokOpen(req, res);
+  if (req.method === 'GET' && requestUrl.pathname === '/api/tiktok/capture') return handleTikTokCapture(req, res, requestUrl);
+  if (req.method === 'GET' && requestUrl.pathname === '/api/tiktok/download') return handleTikTokDownload(req, res, requestUrl);
   if (req.method === 'GET' && requestUrl.pathname === '/api/download') return handleDownload(req, res, requestUrl);
   if (req.method !== 'GET') return json(res, 405, { error: 'Method not allowed' });
   const path = requestUrl.pathname === '/' ? '/index.html' : requestUrl.pathname;

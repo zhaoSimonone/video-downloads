@@ -1,6 +1,6 @@
 # ClipDock
 
-一个本地运行的抖音 / 微信视频号视频下载工作台，桌面端优先。
+一个本地运行的抖音 / 微信视频号 / Instagram / TikTok 视频下载工作台，桌面端优先。
 
 ## 启动
 
@@ -33,11 +33,12 @@ zsh scripts/restore-network-proxy.sh
 
 ## 当前能力
 
-- 识别抖音、微信视频号和 Instagram Reel 链接
+- 识别抖音、微信视频号、Instagram Reel 和 TikTok 链接
 - 对平台分享页明确提示需要登录态或可访问的媒体直链
 - 对 `mp4` / `mov` / `webm` 等媒体直链执行本地代理下载
 - 可选连接 `wx_channels_download` 本机代理，处理微信视频号分享链接
 - Instagram Reel 支持通过独立 Chrome 登录会话捕获播放时产生的媒体请求
+- TikTok 视频支持通过独立 Chrome 登录会话捕获播放时产生的媒体请求
 - Instagram 捕获的视频会自动转换为 QuickTime 兼容的 H.264/AAC MP4，并保存为 `instagram-reel-compatible.mp4`
 - 下载记录保存在浏览器 `localStorage` 中
 - 阻止本地网络地址，避免把下载接口作为 SSRF 代理
@@ -67,6 +68,10 @@ WX_CHANNELS_AGENT_ORIGIN=http://127.0.0.1:2022 npm start
 Instagram 当前常返回 VP9 fragmented MP4，且可能把音频作为独立媒体轨道提供。这类文件虽然是合法 MP4，但 QuickTime 可能无法打开，或只显示画面没有声音。ClipDock 下载时会在临时目录中收集目标视频及其音频轨道，使用本机 `ffmpeg` 合并并转为 H.264/AAC MP4，再交给 macOS 保存。应用会自动查找 `FFMPEG_PATH`、Homebrew 常见路径和 `PATH` 中的 `ffmpeg`；若未找到，请执行 `brew install ffmpeg` 后重试。临时源文件会在响应完成后删除。
 
 Chrome 调试接口仅监听 `127.0.0.1`，捕获逻辑只保留 User-Agent、Referer 等必要请求头，不读取或保存 Cookie。请仅处理自己拥有或获授权使用的内容。
+
+## TikTok 捕获
+
+粘贴 TikTok 视频链接并提取信息后，点击“打开并捕获”。ClipDock 会在本地 Chrome 登录档案中打开链接，等待目标视频播放产生 TikTok CDN 媒体请求。播放一次目标视频后即可下载；视频通常已包含声音，下载接口会保留原始音视频轨道。TikTok 的签名媒体地址有效期较短，请在捕获后立即下载。若页面要求登录或出现地区限制，请先在打开的 Chrome 窗口中完成登录并确认视频可以正常播放。
 
 ## 历史小程序目录
 
