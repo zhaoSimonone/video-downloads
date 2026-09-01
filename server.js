@@ -257,14 +257,47 @@ function safeTikTokHeaders(headers = {}) {
   return result;
 }
 
+function firstInstagramMetadataValue(value, keys, depth = 0) {
+  if (!value || depth > 5 || typeof value !== 'object') return null;
+  const wanted = new Set(keys.map(key => key.toLowerCase()));
+  for (const [key, item] of Object.entries(value)) {
+    if (wanted.has(String(key).toLowerCase()) && item !== null && item !== undefined && item !== '') {
+      return item;
+    }
+  }
+  for (const item of Object.values(value)) {
+    const found = firstInstagramMetadataValue(item, keys, depth + 1);
+    if (found !== null && found !== undefined && found !== '') return found;
+  }
+  return null;
+}
+
 function instagramTrackMetadata(rawUrl) {
+  const empty = { raw: '', data: null, assetId: '', duration: null, isAudio: false };
   try {
     const url = new URL(rawUrl);
     const encoded = url.searchParams.get('efg');
-    if (!encoded) return '';
-    return Buffer.from(encoded, 'base64').toString('utf8').toLowerCase();
+    if (!encoded) return empty;
+    const normalized = encoded.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(encoded.length / 4) * 4, '=');
+    const raw = Buffer.from(normalized, 'base64').toString('utf8').trim();
+    let data = null;
+    try { data = JSON.parse(raw); } catch { /* some requests use a plain metadata string */ }
+    const assetValue = data
+      ? firstInstagramMetadataValue(data, ['xpv_asset_id', 'xpvAssetId', 'asset_id', 'assetId'])
+      : raw.match(/(?:xpv_asset_id|asset_id)\s*["'=:\s]+([a-z0-9._:-]+)/i)?.[1];
+    const durationValue = data
+      ? firstInstagramMetadataValue(data, ['duration_s', 'durationSec', 'duration_sec', 'duration'])
+      : raw.match(/duration(?:_s|_sec)?\s*["'=:\s]+([0-9]+(?:\.[0-9]+)?)/i)?.[1];
+    const duration = Number(durationValue);
+    return {
+      raw: raw.toLowerCase(),
+      data,
+      assetId: assetValue === null || assetValue === undefined ? '' : String(assetValue),
+      duration: Number.isFinite(duration) && duration > 0 ? duration : null,
+      isAudio: /(?:audio|heaac|aac)/i.test(raw) || Boolean(data && firstInstagramMetadataValue(data, ['is_audio', 'isAudio', 'audio_only'])),
+    };
   } catch {
-    return '';
+    return empty;
   }
 }
 
@@ -272,7 +305,7 @@ function instagramMediaCandidate(url, response, requestHeaders = {}) {
   const mimeType = String(response?.mimeType || '').toLowerCase();
   const resourceType = String(response?.resourceType || '').toLowerCase();
   const trackMetadata = instagramTrackMetadata(url);
-  const looksLikeAudio = mimeType.startsWith('audio/') || /\.(?:m4a|aac|mp3|opus)(?:$|[?&])/i.test(url) || /(?:audio|heaac|aac)/i.test(trackMetadata);
+  const looksLikeAudio = mimeType.startsWith('audio/') || /\.(?:m4a|aac|mp3|opus)(?:$|[?&])/i.test(url) || trackMetadata.isAudio || /(?:audio|heaac|aac)/i.test(trackMetadata.raw);
   const looksLikeVideo = mimeType.startsWith('video/') || /\.(?:mp4|m4v|webm)(?:$|[?&])/i.test(url);
   if (!isInstagramMediaUrl(url) || (!looksLikeVideo && !looksLikeAudio && resourceType !== 'media')) return null;
   return {
@@ -284,6 +317,9 @@ function instagramMediaCandidate(url, response, requestHeaders = {}) {
     size: Number(response?.headers?.['content-length'] || response?.headers?.['Content-Length'] || 0),
     seenAt: Date.now(),
     headers: safeInstagramHeaders(requestHeaders),
+    assetId: trackMetadata.assetId,
+    duration: trackMetadata.duration,
+    trackMetadata,
   };
 }
 
@@ -346,9 +382,28 @@ function choosePlayedInstagramMedia(candidates, playedVideos) {
 }
 
 function chooseInstagramAudio(candidates, videoCandidate) {
-  return [...candidates.values()]
+  const pool = [...candidates.values()]
     .filter(item => item !== videoCandidate && item.kind === 'audio' && item.status >= 200 && item.status < 300 && item.size >= 8 * 1024)
-    .sort((a, b) => Math.abs((a.seenAt || 0) - (videoCandidate.seenAt || 0)) - Math.abs((b.seenAt || 0) - (videoCandidate.seenAt || 0)) || b.size - a.size)[0] || null;
+    .map(item => ({ item, distance: Math.abs((item.seenAt || 0) - (videoCandidate.seenAt || 0)) }));
+  if (!pool.length) return null;
+
+  // Instagram preloads audio for many nearby Reels. The efg metadata carries
+  // xpv_asset_id for both tracks; never merge a known different asset.
+  if (videoCandidate.assetId) {
+    const sameAsset = pool
+      .filter(entry => entry.item.assetId === videoCandidate.assetId)
+      .sort((a, b) => a.distance - b.distance || b.item.size - a.item.size);
+    return sameAsset[0]?.item || null;
+  }
+  if (pool.some(entry => entry.item.assetId)) return null;
+
+  // Older responses can omit the asset id. A close duration is a useful but
+  // deliberately strict fallback, while time alone is not enough.
+  const videoDuration = Number(videoCandidate.duration);
+  if (!Number.isFinite(videoDuration) || videoDuration <= 0) return null;
+  return pool
+    .filter(entry => Number.isFinite(entry.item.duration) && Math.abs(entry.item.duration - videoDuration) <= 0.75)
+    .sort((a, b) => Math.abs(a.item.duration - videoDuration) - Math.abs(b.item.duration - videoDuration) || a.distance - b.distance || b.item.size - a.item.size)[0]?.item || null;
 }
 
 function choosePlayedTikTokMedia(candidates, playedVideos) {
