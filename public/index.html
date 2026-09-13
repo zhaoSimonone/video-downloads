@@ -17,6 +17,7 @@
         <div class="brand"><span class="brand-mark">C</span><span>ClipDock</span><span class="brand-beta">BETA</span></div>
         <nav class="nav" aria-label="主导航">
           <button class="nav-item active" data-view="downloader"><span class="nav-icon">↓</span><span>下载器</span></button>
+          <button class="nav-item" data-view="compare"><span class="nav-icon">▥</span><span>视频对比</span></button>
           <button class="nav-item" data-view="history"><span class="nav-icon">◷</span><span>下载记录</span><span class="nav-count" id="historyCount">0</span></button>
         </nav>
         <div class="sidebar-bottom">
@@ -45,6 +46,19 @@
         </section>
 
         <section class="view hidden" id="historyView"><div class="page-intro compact-intro"><div><p class="eyebrow">DOWNLOAD LOG <span></span></p><h1>下载记录</h1><p class="intro-copy">最近处理过的链接会保存在当前浏览器中。</p></div><button class="ghost-button" id="clearHistory"><span>×</span> 清空记录</button></div><section class="panel history-panel"><div id="historyList" class="history-list"></div><div id="historyEmpty" class="history-empty"><div class="empty-glyph">◷</div><h3>还没有下载记录</h3><p>完成一次下载后，记录会出现在这里。</p></div></section></section>
+
+        <section class="view hidden" id="compareView">
+          <div class="page-intro compare-intro"><div><p class="eyebrow">VIDEO COMPARISON <span></span></p><h1>并排看清差异。</h1><p class="intro-copy">选择下载后的本地视频，最多同时比较 3 个版本。</p></div><button class="primary-button compare-add-button" type="button" id="compareAddButton"><span>＋</span><span>添加视频</span></button></div>
+          <section class="panel compare-panel">
+            <div class="compare-toolbar">
+              <div class="compare-toolbar-main"><strong id="compareCount">0 / 3 个视频</strong><span id="compareHint">视频只在当前设备中播放，不会上传。</span></div>
+              <div class="compare-actions"><button class="compare-control" type="button" id="comparePlayButton" disabled><span>▶</span><span>同时播放</span></button><button class="compare-control" type="button" id="compareMuteButton" disabled><span>⌕</span><span>静音</span></button><label class="speed-control" for="compareSpeed">速度<select id="compareSpeed" disabled><option value="1">1×</option><option value="0.5">0.5×</option><option value="1.5">1.5×</option><option value="2">2×</option></select></label><button class="compare-clear" type="button" id="compareClearButton" disabled>清空</button></div>
+            </div>
+            <div class="compare-stage" id="compareStage"><div class="compare-empty" id="compareEmpty"><div class="compare-empty-icon">▥</div><h3>添加视频开始对比</h3><p>可以一次选择多个 MP4、MOV 或 WebM 文件。</p><button class="ghost-button" type="button" id="compareEmptyButton">选择本地视频</button></div></div>
+            <div class="compare-timeline hidden" id="compareTimeline"><div class="compare-time"><span id="compareCurrentTime">00:00</span><span id="compareDuration">00:00</span></div><input type="range" id="compareSeek" min="0" max="0" step="0.01" value="0" aria-label="对比视频进度" /></div>
+            <input id="compareFileInput" class="hidden" type="file" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm" multiple />
+          </section>
+        </section>
         <footer class="footer"><span>ClipDock 是本地工具，不存储你的链接或视频。</span><span>仅限个人学习与获得授权的内容</span></footer>
       </main>
     </div>

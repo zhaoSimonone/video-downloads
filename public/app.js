@@ -1,6 +1,6 @@
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
-const state = { platform: 'douyin', result: null, history: JSON.parse(localStorage.getItem('clipdock-history') || '[]') };
+const state = { platform: 'douyin', result: null, history: JSON.parse(localStorage.getItem('clipdock-history') || '[]'), compareItems: [], compareSyncing: false, compareMuted: false };
 
 function toast(message) { const el = $('#toast'); el.textContent = message; el.classList.add('show'); clearTimeout(window.__toast); window.__toast = setTimeout(() => el.classList.remove('show'), 3200); }
 function saveHistory() { localStorage.setItem('clipdock-history', JSON.stringify(state.history.slice(0, 20))); $('#historyCount').textContent = state.history.length; renderHistory(); renderRecentHistory(); }
@@ -27,6 +27,84 @@ function renderRecentHistory() {
 }
 function escapeHtml(value) { return String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 function addHistory(result, filename = '') { state.history.unshift({ title: result.title, source: result.source, platform: result.platform, filename, time: new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) }); saveHistory(); }
+
+const compareStage = $('#compareStage');
+const compareFileInput = $('#compareFileInput');
+const compareEmpty = $('#compareEmpty');
+const comparePlayButton = $('#comparePlayButton');
+const compareMuteButton = $('#compareMuteButton');
+const compareSpeed = $('#compareSpeed');
+const compareClearButton = $('#compareClearButton');
+const compareSeek = $('#compareSeek');
+const compareTimeline = $('#compareTimeline');
+
+function compareVideos() { return state.compareItems.map(item => item.video).filter(Boolean); }
+function formatCompareTime(seconds) { if (!Number.isFinite(seconds) || seconds < 0) seconds = 0; const mins = Math.floor(seconds / 60); const secs = Math.floor(seconds % 60); return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`; }
+function compareUpdateControls() {
+  const count = state.compareItems.length; const videos = compareVideos(); const hasItems = count > 0;
+  $('#compareCount').textContent = `${count} / 3 个视频`;
+  $('#compareHint').textContent = count >= 3 ? '已达到并排比较上限。' : '视频只在当前设备中播放，不会上传。';
+  comparePlayButton.disabled = !hasItems; compareMuteButton.disabled = !hasItems; compareSpeed.disabled = !hasItems; compareClearButton.disabled = !hasItems;
+  compareTimeline.classList.toggle('hidden', !hasItems);
+  comparePlayButton.querySelector('span:last-child').textContent = videos.some(video => !video.paused) ? '暂停播放' : '同时播放';
+  comparePlayButton.querySelector('span:first-child').textContent = videos.some(video => !video.paused) ? 'Ⅱ' : '▶';
+  compareMuteButton.querySelector('span:last-child').textContent = state.compareMuted ? '取消静音' : '静音';
+  compareMuteButton.querySelector('span:first-child').textContent = state.compareMuted ? '◉' : '⌕';
+}
+function compareUpdateTimeline(sourceVideo = compareVideos()[0]) {
+  if (!sourceVideo) return;
+  const durations = compareVideos().map(video => video.duration).filter(Number.isFinite);
+  const duration = durations.length ? Math.max(...durations) : 0;
+  compareSeek.max = String(duration); compareSeek.value = String(Math.min(sourceVideo.currentTime || 0, duration));
+  $('#compareCurrentTime').textContent = formatCompareTime(sourceVideo.currentTime);
+  $('#compareDuration').textContent = formatCompareTime(duration);
+}
+function compareSetPlayback(shouldPlay) {
+  const videos = compareVideos(); if (!videos.length) return;
+  state.compareSyncing = true;
+  if (shouldPlay) videos.forEach(video => { video.play().catch(() => {}); }); else videos.forEach(video => video.pause());
+  window.setTimeout(() => { state.compareSyncing = false; compareUpdateControls(); }, 80);
+}
+function compareRender() {
+  compareStage.querySelectorAll('.compare-card').forEach(card => card.remove());
+  compareEmpty.classList.toggle('hidden', state.compareItems.length > 0);
+  state.compareItems.forEach((item, index) => {
+    const card = document.createElement('article'); card.className = 'compare-card'; card.dataset.index = String(index);
+    card.innerHTML = `<div class="compare-card-head"><strong title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</strong><button type="button" class="compare-remove" aria-label="移除 ${escapeHtml(item.name)}" title="移除视频">×</button></div><div class="compare-video-wrap"><video preload="metadata" playsinline></video><span class="compare-video-badge">${String(index + 1).padStart(2, '0')}</span></div>`;
+    const video = card.querySelector('video'); video.src = item.url; video.muted = state.compareMuted; video.playbackRate = Number(compareSpeed.value || 1); item.video = video;
+    video.addEventListener('loadedmetadata', () => compareUpdateTimeline(video));
+    video.addEventListener('timeupdate', () => { if (!state.compareSyncing) compareUpdateTimeline(video); });
+    video.addEventListener('play', () => { if (!state.compareSyncing) compareSetPlayback(true); compareUpdateControls(); });
+    video.addEventListener('pause', () => { if (!state.compareSyncing) compareSetPlayback(false); compareUpdateControls(); });
+    video.addEventListener('ended', () => { if (!state.compareSyncing) compareSetPlayback(false); compareUpdateControls(); });
+    video.addEventListener('click', () => compareSetPlayback(videosArePlaying() ? false : true));
+    card.querySelector('.compare-remove').addEventListener('click', () => compareRemove(index));
+    compareStage.append(card);
+  });
+  compareUpdateControls(); compareUpdateTimeline();
+}
+function videosArePlaying() { return compareVideos().some(video => !video.paused); }
+function compareRemove(index) { const item = state.compareItems[index]; if (!item) return; URL.revokeObjectURL(item.url); state.compareItems.splice(index, 1); compareRender(); }
+function compareAddFiles(files) {
+  const incoming = [...files].filter(file => file.type.startsWith('video/') || /\.(mp4|mov|webm)$/i.test(file.name));
+  const available = 3 - state.compareItems.length;
+  incoming.slice(0, Math.max(0, available)).forEach(file => state.compareItems.push({ file, name: file.name, url: URL.createObjectURL(file), video: null }));
+  if (incoming.length > available) toast('最多同时比较 3 个视频');
+  if (!incoming.length) toast('请选择 MP4、MOV 或 WebM 视频');
+  compareFileInput.value = ''; compareRender();
+}
+
+$('#compareAddButton').addEventListener('click', () => compareFileInput.click());
+$('#compareEmptyButton').addEventListener('click', () => compareFileInput.click());
+compareFileInput.addEventListener('change', event => compareAddFiles(event.target.files));
+comparePlayButton.addEventListener('click', () => compareSetPlayback(!videosArePlaying()));
+compareMuteButton.addEventListener('click', () => { state.compareMuted = !state.compareMuted; compareVideos().forEach(video => { video.muted = state.compareMuted; }); compareUpdateControls(); });
+compareSpeed.addEventListener('change', () => compareVideos().forEach(video => { video.playbackRate = Number(compareSpeed.value); }));
+compareClearButton.addEventListener('click', () => { state.compareItems.forEach(item => URL.revokeObjectURL(item.url)); state.compareItems = []; compareRender(); });
+compareSeek.addEventListener('input', () => { const time = Number(compareSeek.value); state.compareSyncing = true; compareVideos().forEach(video => { video.currentTime = Math.min(time, Number.isFinite(video.duration) ? video.duration : time); }); compareUpdateTimeline(compareVideos()[0]); window.setTimeout(() => { state.compareSyncing = false; }, 80); });
+compareStage.addEventListener('dragover', event => { event.preventDefault(); compareStage.classList.add('is-dragging'); });
+compareStage.addEventListener('dragleave', () => compareStage.classList.remove('is-dragging'));
+compareStage.addEventListener('drop', event => { event.preventDefault(); compareStage.classList.remove('is-dragging'); compareAddFiles(event.dataTransfer.files); });
 
 $('#urlInput').addEventListener('input', (event) => { $('#charCount').textContent = `${event.target.value.length} / 2000`; });
 $('#clearUrl').addEventListener('click', () => { $('#urlInput').value = ''; $('#charCount').textContent = '0 / 2000'; $('#urlInput').focus(); });
@@ -102,7 +180,7 @@ function downloadFilename(contentDisposition) {
   return plain ? plain[1] : '';
 }
 
-$$('.nav-item').forEach(item => item.addEventListener('click', () => { const view = item.dataset.view; $$('.nav-item').forEach(nav => nav.classList.toggle('active', nav === item)); $('#downloaderView').classList.toggle('hidden', view !== 'downloader'); $('#historyView').classList.toggle('hidden', view !== 'history'); $('#pageTitle').textContent = view === 'history' ? '下载记录' : '下载器'; }));
+$$('.nav-item').forEach(item => item.addEventListener('click', () => { const view = item.dataset.view; $$('.nav-item').forEach(nav => nav.classList.toggle('active', nav === item)); $('#downloaderView').classList.toggle('hidden', view !== 'downloader'); $('#historyView').classList.toggle('hidden', view !== 'history'); $('#compareView').classList.toggle('hidden', view !== 'compare'); $('#pageTitle').textContent = view === 'history' ? '下载记录' : view === 'compare' ? '视频对比' : '下载器'; }));
 $('#openHistory').addEventListener('click', () => { document.querySelector('.nav-item[data-view="history"]').click(); });
 $('#clearHistory').addEventListener('click', () => { state.history = []; saveHistory(); toast('已清空下载记录'); });
 document.addEventListener('keydown', async event => {

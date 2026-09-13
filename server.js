@@ -351,6 +351,15 @@ function instagramMediaKey(raw) {
   }
 }
 
+function tiktokMediaKey(raw) {
+  try {
+    const url = raw instanceof URL ? raw : new URL(String(raw));
+    return `${url.hostname.toLowerCase()}${url.pathname}`;
+  } catch {
+    return '';
+  }
+}
+
 function choosePlayedInstagramMedia(candidates, playedVideos) {
   const playable = playedVideos
     .map(item => ({ ...item, key: instagramMediaKey(item.src) }))
@@ -407,17 +416,33 @@ function chooseInstagramAudio(candidates, videoCandidate) {
 }
 
 function choosePlayedTikTokMedia(candidates, playedVideos) {
-  const playable = playedVideos.filter(item => item.src);
+  const playable = playedVideos
+    .map(item => ({ ...item, key: tiktokMediaKey(item.src) }))
+    .filter(item => item.src);
   if (!playable.length) return null;
   const latestPlay = playable
     .filter(item => item.visible || item.userGesture)
     .sort((a, b) => Number(b.at || 0) - Number(a.at || 0))[0] || playable[playable.length - 1];
-  const nearby = [...candidates.values()]
+  const valid = [...candidates.values()]
     .filter(item => item.kind === 'video' && item.status === 200 && item.finishedAt && item.size >= 100 * 1024)
     .map(item => ({ item, distance: Math.abs((item.seenAt || item.finishedAt || 0) - (latestPlay.at || 0)) }))
     .filter(entry => entry.item.seenAt && entry.distance <= 20000)
-    .sort((a, b) => a.distance - b.distance || b.item.size - a.item.size);
-  return nearby[0]?.item || null;
+  if (!valid.length) return null;
+
+  // When currentSrc is a CDN URL, use its path to exclude preloaded videos
+  // from the feed. A single playback can still produce several quality
+  // variants with the same path, so choose the largest completed response.
+  const exact = latestPlay.key
+    ? valid.filter(entry => tiktokMediaKey(entry.item.url) === latestPlay.key)
+    : [];
+  const pool = exact.length ? exact : valid;
+  const nearestDistance = Math.min(...pool.map(entry => entry.distance));
+  const associated = exact.length
+    ? pool
+    : pool.filter(entry => entry.distance <= Math.max(3000, nearestDistance + 2500));
+  return associated
+    .sort((a, b) => (b.item.bodySize || b.item.size) - (a.item.bodySize || a.item.size) || a.distance - b.distance)
+    .at(0)?.item || null;
 }
 
 async function readCdpResponseBody(cdp, candidate, requestId) {
@@ -684,10 +709,22 @@ async function startTikTokCapture(session) {
     session.status = 'waiting';
     session.message = '请在打开的 Chrome 页面中登录 TikTok，并点击目标视频播放一次';
     const deadline = Date.now() + INSTAGRAM_CAPTURE_TIMEOUT_MS;
+    let firstCandidateAt = 0;
     while (!session.media && Date.now() < deadline && !shuttingDown) {
       const playback = await readInstagramPlayback(cdp);
       const selected = choosePlayedTikTokMedia(session.candidates, playback.plays || []);
       if (selected) {
+        // The player can request a low-quality preview before the preferred
+        // stream. Let the network settle, then choose the largest complete
+        // candidate associated with this playback.
+        if (!firstCandidateAt) {
+          firstCandidateAt = Date.now();
+          session.message = '已发现视频流，正在选择最高质量版本…';
+        }
+        if (Date.now() - firstCandidateAt < 2500) {
+          await delay(250);
+          continue;
+        }
         // TikTok signs CDN URLs and may reject a later server-side request.
         // Give Chrome a moment to expose the already-loaded response body so
         // the download can be served without leaving the authenticated session.
