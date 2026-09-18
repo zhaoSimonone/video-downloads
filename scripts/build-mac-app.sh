@@ -40,6 +40,7 @@ cp "$ROOT_DIR/bin/wx_video_download" "$RESOURCES_DIR/bin/wx_video_download"
 chmod +x "$RESOURCES_DIR/bin/wx_video_download"
 cp "$ROOT_DIR/public/index.html" "$RESOURCES_DIR/public/index.html"
 cp "$ROOT_DIR/public/app.js" "$RESOURCES_DIR/public/app.js"
+cp "$ROOT_DIR/public/compare-playback.js" "$RESOURCES_DIR/public/compare-playback.js"
 cp "$ROOT_DIR/public/styles.css" "$RESOURCES_DIR/public/styles.css"
 
 swiftc -O \

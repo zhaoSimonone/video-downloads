@@ -1,6 +1,8 @@
+import { ComparePlayback } from './compare-playback.js';
+
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
-const state = { platform: 'douyin', result: null, history: JSON.parse(localStorage.getItem('clipdock-history') || '[]'), compareItems: [], compareSyncing: false, compareMuted: false };
+const state = { platform: 'douyin', result: null, history: JSON.parse(localStorage.getItem('clipdock-history') || '[]'), compareItems: [] };
 
 function toast(message) { const el = $('#toast'); el.textContent = message; el.classList.add('show'); clearTimeout(window.__toast); window.__toast = setTimeout(() => el.classList.remove('show'), 3200); }
 function saveHistory() { localStorage.setItem('clipdock-history', JSON.stringify(state.history.slice(0, 20))); $('#historyCount').textContent = state.history.length; renderHistory(); renderRecentHistory(); }
@@ -37,54 +39,74 @@ const compareSpeed = $('#compareSpeed');
 const compareClearButton = $('#compareClearButton');
 const compareSeek = $('#compareSeek');
 const compareTimeline = $('#compareTimeline');
+let compareScrubbing = false;
+let compareResumeAfterSeek = false;
+let compareControlsKey = '';
+const comparePlayback = new ComparePlayback({
+  onChange: () => { compareUpdateControls(); compareUpdateTimeline(); },
+  onError: error => toast(error?.name === 'NotAllowedError' ? '播放被系统阻止，请重新点击播放' : '视频无法播放或加载超时，请检查文件是否支持在本机播放'),
+});
 
 function compareVideos() { return state.compareItems.map(item => item.video).filter(Boolean); }
 function formatCompareTime(seconds) { if (!Number.isFinite(seconds) || seconds < 0) seconds = 0; const mins = Math.floor(seconds / 60); const secs = Math.floor(seconds % 60); return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`; }
 function compareUpdateControls() {
-  const count = state.compareItems.length; const videos = compareVideos(); const hasItems = count > 0;
+  const count = state.compareItems.length; const hasItems = count > 0;
+  const controlsKey = `${count}:${comparePlayback.status}:${comparePlayback.wantsPlayback}:${comparePlayback.muted}:${comparePlayback.duration}`;
+  if (controlsKey === compareControlsKey) return;
+  compareControlsKey = controlsKey;
   $('#compareCount').textContent = `${count} / 3 个视频`;
   $('#compareHint').textContent = count >= 3 ? '已达到并排比较上限。' : '视频只在当前设备中播放，不会上传。';
   comparePlayButton.disabled = !hasItems; compareMuteButton.disabled = !hasItems; compareSpeed.disabled = !hasItems; compareClearButton.disabled = !hasItems;
   compareTimeline.classList.toggle('hidden', !hasItems);
-  comparePlayButton.querySelector('span:last-child').textContent = videos.some(video => !video.paused) ? '暂停播放' : '同时播放';
-  comparePlayButton.querySelector('span:first-child').textContent = videos.some(video => !video.paused) ? 'Ⅱ' : '▶';
-  compareMuteButton.querySelector('span:last-child').textContent = state.compareMuted ? '取消静音' : '静音';
-  compareMuteButton.querySelector('span:first-child').textContent = state.compareMuted ? '◉' : '⌕';
+  const playLabel = comparePlayback.wantsPlayback ? (comparePlayback.status === 'loading' ? '准备中…' : '暂停播放') : '同时播放';
+  const playIcon = comparePlayback.wantsPlayback ? 'Ⅱ' : '▶';
+  if (comparePlayButton.lastElementChild.textContent !== playLabel) comparePlayButton.lastElementChild.textContent = playLabel;
+  if (comparePlayButton.firstElementChild.textContent !== playIcon) comparePlayButton.firstElementChild.textContent = playIcon;
+  compareMuteButton.querySelector('span:last-child').textContent = comparePlayback.muted ? '取消静音' : '静音';
+  compareMuteButton.querySelector('span:first-child').textContent = comparePlayback.muted ? '◉' : '⌕';
+  compareStage.setAttribute('aria-busy', String(comparePlayback.status === 'loading'));
+  compareSeek.disabled = !comparePlayback.duration;
 }
-function compareUpdateTimeline(sourceVideo = compareVideos()[0]) {
-  if (!sourceVideo) return;
-  const durations = compareVideos().map(video => video.duration).filter(Number.isFinite);
-  const duration = durations.length ? Math.max(...durations) : 0;
-  compareSeek.max = String(duration); compareSeek.value = String(Math.min(sourceVideo.currentTime || 0, duration));
-  $('#compareCurrentTime').textContent = formatCompareTime(sourceVideo.currentTime);
-  $('#compareDuration').textContent = formatCompareTime(duration);
+function compareUpdateTimeline() {
+  if (compareScrubbing) return;
+  compareSeek.max = String(comparePlayback.duration);
+  compareSeek.value = String(comparePlayback.currentTime);
+  $('#compareCurrentTime').textContent = formatCompareTime(comparePlayback.currentTime);
+  $('#compareDuration').textContent = formatCompareTime(comparePlayback.duration);
 }
 function compareSetPlayback(shouldPlay) {
-  const videos = compareVideos(); if (!videos.length) return;
-  state.compareSyncing = true;
-  if (shouldPlay) videos.forEach(video => { video.play().catch(() => {}); }); else videos.forEach(video => video.pause());
-  window.setTimeout(() => { state.compareSyncing = false; compareUpdateControls(); }, 80);
+  if (shouldPlay) comparePlayback.play(); else comparePlayback.pause();
 }
 function compareRender() {
-  compareStage.querySelectorAll('.compare-card').forEach(card => card.remove());
+  compareScrubbing = false;
   compareEmpty.classList.toggle('hidden', state.compareItems.length > 0);
   state.compareItems.forEach((item, index) => {
+    if (item.card) {
+      item.card.querySelector('.compare-video-badge').textContent = String(index + 1).padStart(2, '0');
+      return;
+    }
     const card = document.createElement('article'); card.className = 'compare-card'; card.dataset.index = String(index);
-    card.innerHTML = `<div class="compare-card-head"><strong title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</strong><button type="button" class="compare-remove" aria-label="移除 ${escapeHtml(item.name)}" title="移除视频">×</button></div><div class="compare-video-wrap"><video preload="metadata" playsinline></video><span class="compare-video-badge">${String(index + 1).padStart(2, '0')}</span></div>`;
-    const video = card.querySelector('video'); video.src = item.url; video.muted = state.compareMuted; video.playbackRate = Number(compareSpeed.value || 1); item.video = video;
-    video.addEventListener('loadedmetadata', () => compareUpdateTimeline(video));
-    video.addEventListener('timeupdate', () => { if (!state.compareSyncing) compareUpdateTimeline(video); });
-    video.addEventListener('play', () => { if (!state.compareSyncing) compareSetPlayback(true); compareUpdateControls(); });
-    video.addEventListener('pause', () => { if (!state.compareSyncing) compareSetPlayback(false); compareUpdateControls(); });
-    video.addEventListener('ended', () => { if (!state.compareSyncing) compareSetPlayback(false); compareUpdateControls(); });
-    video.addEventListener('click', () => compareSetPlayback(videosArePlaying() ? false : true));
-    card.querySelector('.compare-remove').addEventListener('click', () => compareRemove(index));
+    card.innerHTML = `<div class="compare-card-head"><strong title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</strong><button type="button" class="compare-remove" aria-label="移除 ${escapeHtml(item.name)}" title="移除视频">×</button></div><div class="compare-video-wrap"><video preload="auto" playsinline></video><span class="compare-video-badge">${String(index + 1).padStart(2, '0')}</span></div>`;
+    const video = card.querySelector('video'); video.src = item.url; item.video = video; item.card = card;
+    video.addEventListener('click', () => compareSetPlayback(!comparePlayback.wantsPlayback));
+    card.querySelector('.compare-remove').addEventListener('click', () => compareRemove(item));
     compareStage.append(card);
   });
+  comparePlayback.setVideos(compareVideos());
   compareUpdateControls(); compareUpdateTimeline();
 }
-function videosArePlaying() { return compareVideos().some(video => !video.paused); }
-function compareRemove(index) { const item = state.compareItems[index]; if (!item) return; URL.revokeObjectURL(item.url); state.compareItems.splice(index, 1); compareRender(); }
+function compareDispose(item) {
+  item.video?.pause();
+  item.video?.removeAttribute('src');
+  item.video?.load();
+  item.card?.remove();
+  URL.revokeObjectURL(item.url);
+}
+function compareRemove(item) {
+  state.compareItems = state.compareItems.filter(candidate => candidate !== item);
+  compareRender();
+  compareDispose(item);
+}
 function compareAddFiles(files) {
   const incoming = [...files].filter(file => file.type.startsWith('video/') || /\.(mp4|mov|webm)$/i.test(file.name));
   const available = 3 - state.compareItems.length;
@@ -97,11 +119,29 @@ function compareAddFiles(files) {
 $('#compareAddButton').addEventListener('click', () => compareFileInput.click());
 $('#compareEmptyButton').addEventListener('click', () => compareFileInput.click());
 compareFileInput.addEventListener('change', event => compareAddFiles(event.target.files));
-comparePlayButton.addEventListener('click', () => compareSetPlayback(!videosArePlaying()));
-compareMuteButton.addEventListener('click', () => { state.compareMuted = !state.compareMuted; compareVideos().forEach(video => { video.muted = state.compareMuted; }); compareUpdateControls(); });
-compareSpeed.addEventListener('change', () => compareVideos().forEach(video => { video.playbackRate = Number(compareSpeed.value); }));
-compareClearButton.addEventListener('click', () => { state.compareItems.forEach(item => URL.revokeObjectURL(item.url)); state.compareItems = []; compareRender(); });
-compareSeek.addEventListener('input', () => { const time = Number(compareSeek.value); state.compareSyncing = true; compareVideos().forEach(video => { video.currentTime = Math.min(time, Number.isFinite(video.duration) ? video.duration : time); }); compareUpdateTimeline(compareVideos()[0]); window.setTimeout(() => { state.compareSyncing = false; }, 80); });
+comparePlayButton.addEventListener('click', () => compareSetPlayback(!comparePlayback.wantsPlayback));
+compareMuteButton.addEventListener('click', () => comparePlayback.setMuted(!comparePlayback.muted));
+compareSpeed.addEventListener('change', () => comparePlayback.setRate(Number(compareSpeed.value)));
+compareClearButton.addEventListener('click', () => {
+  const removed = state.compareItems;
+  state.compareItems = [];
+  compareRender();
+  removed.forEach(compareDispose);
+});
+compareSeek.addEventListener('input', () => {
+  if (!compareScrubbing) {
+    compareScrubbing = true;
+    compareResumeAfterSeek = comparePlayback.wantsPlayback;
+    comparePlayback.pause();
+  }
+  $('#compareCurrentTime').textContent = formatCompareTime(Number(compareSeek.value));
+});
+compareSeek.addEventListener('change', () => {
+  const time = Number(compareSeek.value);
+  const resume = compareScrubbing ? compareResumeAfterSeek : comparePlayback.wantsPlayback;
+  compareScrubbing = false;
+  comparePlayback.seek(time, resume);
+});
 compareStage.addEventListener('dragover', event => { event.preventDefault(); compareStage.classList.add('is-dragging'); });
 compareStage.addEventListener('dragleave', () => compareStage.classList.remove('is-dragging'));
 compareStage.addEventListener('drop', event => { event.preventDefault(); compareStage.classList.remove('is-dragging'); compareAddFiles(event.dataTransfer.files); });
