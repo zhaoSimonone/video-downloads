@@ -9,6 +9,8 @@ RESOURCES_DIR="$CONTENTS_DIR/Resources"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 ICON_SOURCE="$ROOT_DIR/assets/ClipDock.svg"
 ICONSET_DIR="$BUILD_DIR/ClipDock.iconset"
+APP_VERSION="${CLIPDOCK_VERSION:-1.0.1}"
+APP_BUILD="${CLIPDOCK_BUILD:-2}"
 
 rm -rf "$BUILD_DIR" "$APP_DIR"
 mkdir -p "$BUILD_DIR" "$RESOURCES_DIR/public" "$RESOURCES_DIR/bin" "$MACOS_DIR"
@@ -49,7 +51,7 @@ swiftc -O \
   "$ROOT_DIR/macapp/Sources/ClipDockApp.swift" \
   -o "$MACOS_DIR/ClipDock"
 
-cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
+cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -67,9 +69,9 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
   <key>CFBundleIconFile</key>
   <string>ClipDock</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.0.0</string>
+  <string>${APP_VERSION}</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>${APP_BUILD}</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>NSHighResolutionCapable</key>

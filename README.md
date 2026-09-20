@@ -19,6 +19,18 @@ zsh scripts/build-mac-app.sh
 open dist/ClipDock.app
 ```
 
+发布包使用 Developer ID 签名，并支持 DMG、ZIP 和 Apple 公证：
+
+```bash
+bash scripts/package_dmg.sh
+xcrun notarytool submit dist/ClipDock.dmg --keychain-profile "TactNotary" --wait
+xcrun stapler staple dist/ClipDock.dmg
+xcrun stapler staple dist/ClipDock.app
+CLIPDOCK_SKIP_APP_BUILD=1 bash scripts/package_zip.sh
+```
+
+`package_dmg.sh` 会生成签名的 `dist/ClipDock.dmg`，`package_zip.sh` 会生成 `dist/ClipDock.zip`。默认版本为 `1.0.1 (build 2)`，可通过 `CLIPDOCK_VERSION` 和 `CLIPDOCK_BUILD` 覆盖。若只做本地 ad-hoc 测试，可设置 `CLIPDOCK_ALLOW_ADHOC=1`，该模式不适合对外分发。
+
 应用运行日志和可写配置位于 `~/Library/Application Support/ClipDock/`。首次启动微信视频号代理时，macOS 可能要求允许安装本地 HTTPS 根证书和设置系统代理；这是微信 PC 页面捕获视频所必需的系统权限。应用关闭时只会停止由它自己启动的进程，不会停止你已经手动运行的代理。
 
 应用内下载文件由 macOS 原生下载组件保存到 `~/Downloads/`，同名文件会自动追加编号。
