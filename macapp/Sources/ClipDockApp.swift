@@ -31,10 +31,15 @@ final class ManagedProcess {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
+    private struct DownloadTracking {
+        var destination: URL?
+        let recordID: String?
+    }
+
     private var window: NSWindow!
     private var webView: WKWebView!
     private var managedProcesses: [ManagedProcess] = []
-    private var downloadDestinations: [ObjectIdentifier: URL] = [:]
+    private var downloads: [ObjectIdentifier: DownloadTracking] = [:]
     private var shuttingDown = false
     private var keyMonitor: Any?
     private let fileManager = FileManager.default
@@ -82,6 +87,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
         download.delegate = self
+        downloads[ObjectIdentifier(download)] = DownloadTracking(
+            destination: nil,
+            recordID: downloadRecordID(from: navigationResponse.response.url)
+        )
     }
 
     func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void) {
@@ -103,15 +112,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         }
         if url.host == "open-downloads" {
             openDownloadsDirectory()
+        } else if url.host == "open-download-records" {
+            openDownloadRecords()
         } else if url.host == "reveal-download" {
-            let name = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "name" })?.value
-            if let name, name == URL(fileURLWithPath: name).lastPathComponent, !name.isEmpty {
-                let destination = downloadsDirectory.appendingPathComponent(name)
-                if fileManager.fileExists(atPath: destination.path) {
-                    NSWorkspace.shared.activateFileViewerSelecting([destination])
-                } else {
-                    openDownloadsDirectory()
-                }
+            let path = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "path" })?.value
+            if let path, let destination = safeDownloadFileURL(path), fileManager.fileExists(atPath: destination.path) {
+                NSWorkspace.shared.activateFileViewerSelecting([destination])
             } else {
                 openDownloadsDirectory()
             }
@@ -134,20 +140,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             destination = downloadsDirectory.appendingPathComponent("\(url.deletingPathExtension().lastPathComponent)-\(suffix).\(extensionPart)")
             suffix += 1
         }
-        downloadDestinations[ObjectIdentifier(download)] = destination
+        let key = ObjectIdentifier(download)
+        if var tracking = downloads[key] {
+            tracking.destination = destination
+            downloads[key] = tracking
+        } else {
+            downloads[key] = DownloadTracking(destination: destination, recordID: nil)
+        }
         completionHandler(destination)
     }
 
     func downloadDidFinish(_ download: WKDownload) {
         NSLog("ClipDock download finished")
-        guard let destination = downloadDestinations.removeValue(forKey: ObjectIdentifier(download)) else { return }
+        guard let tracking = downloads.removeValue(forKey: ObjectIdentifier(download)), let destination = tracking.destination else { return }
+        reportDownloadRecordCompletion(recordID: tracking.recordID, destination: destination)
         DispatchQueue.main.async {
             NSWorkspace.shared.activateFileViewerSelecting([destination])
         }
     }
 
     func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
-        downloadDestinations.removeValue(forKey: ObjectIdentifier(download))
+        let tracking = downloads.removeValue(forKey: ObjectIdentifier(download))
+        reportDownloadRecordFailure(recordID: tracking?.recordID, error: error)
         DispatchQueue.main.async { [weak self] in
             self?.showError("下载失败：\n\(error.localizedDescription)")
         }
@@ -213,8 +227,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             ?? supportDirectory.appendingPathComponent("Downloads", isDirectory: true)
     }
 
+    private var downloadRecordsFile: URL {
+        supportDirectory.appendingPathComponent("download-records.json")
+    }
+
+    private func downloadRecordID(from url: URL?) -> String? {
+        guard let value = url.flatMap({ URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "recordId" })?.value }),
+              UUID(uuidString: value) != nil else { return nil }
+        return value
+    }
+
+    private func safeDownloadFileURL(_ path: String) -> URL? {
+        guard path.hasPrefix("/") else { return nil }
+        let candidate = URL(fileURLWithPath: path).standardizedFileURL
+        let directory = downloadsDirectory.standardizedFileURL
+        guard candidate.path.hasPrefix(directory.path + "/") else { return nil }
+        return candidate
+    }
+
     private func openDownloadsDirectory() {
         NSWorkspace.shared.open(downloadsDirectory)
+    }
+
+    private func openDownloadRecords() {
+        if fileManager.fileExists(atPath: downloadRecordsFile.path) {
+            NSWorkspace.shared.activateFileViewerSelecting([downloadRecordsFile])
+        } else {
+            NSWorkspace.shared.open(supportDirectory)
+        }
+    }
+
+    private func reportDownloadRecordCompletion(recordID: String?, destination: URL) {
+        guard let recordID else { return }
+        reportDownloadRecord(endpoint: "complete", payload: ["id": recordID, "filePath": destination.path])
+    }
+
+    private func reportDownloadRecordFailure(recordID: String?, error: Error) {
+        guard let recordID else { return }
+        reportDownloadRecord(endpoint: "failed", payload: ["id": recordID, "error": error.localizedDescription])
+    }
+
+    private func reportDownloadRecord(endpoint: String, payload: [String: String]) {
+        guard let url = URL(string: "http://127.0.0.1:3457/api/download-records/\(endpoint)"),
+              let body = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 10
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = body
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            guard error == nil, let status = (response as? HTTPURLResponse)?.statusCode, (200..<300).contains(status) else {
+                NSLog("ClipDock could not update the download record")
+                return
+            }
+        }.resume()
     }
 
     private func prepareRuntime(completion: @escaping () -> Void) {
@@ -268,6 +334,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         var environment = ProcessInfo.processInfo.environment
         environment["PORT"] = "3457"
         environment["WX_CHANNELS_AGENT_ORIGIN"] = "http://127.0.0.1:2022"
+        environment["CLIPDOCK_DOWNLOAD_RECORDS_PATH"] = downloadRecordsFile.path
+        environment["CLIPDOCK_DOWNLOADS_DIRECTORY"] = downloadsDirectory.path
         environment["NODE_NO_WARNINGS"] = "1"
         launch(
             executable: node,

@@ -1,9 +1,10 @@
 import http from 'node:http';
 import { createReadStream, createWriteStream, constants as fsConstants } from 'node:fs';
-import { access, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
+import { basename, dirname, extname, isAbsolute, relative, resolve } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { fileURLToPath, URL } from 'node:url';
@@ -17,9 +18,13 @@ const INSTAGRAM_CAPTURE_TIMEOUT_MS = boundedNumber(process.env.INSTAGRAM_CAPTURE
 const INSTAGRAM_CDP_PORT = boundedNumber(process.env.INSTAGRAM_CDP_PORT, 9222, 1024, 65535);
 const INSTAGRAM_TRANSCODE_TIMEOUT_MS = boundedNumber(process.env.INSTAGRAM_TRANSCODE_TIMEOUT_MS, 600000, 30000, 1800000);
 const INSTAGRAM_PROXY_URL = String(process.env.CLIPDOCK_PROXY_URL || 'http://127.0.0.1:2023').trim();
+const DOWNLOAD_RECORDS_PATH = resolve(process.env.CLIPDOCK_DOWNLOAD_RECORDS_PATH || `${homedir()}/Library/Application Support/ClipDock/download-records.json`);
+const DOWNLOADS_DIRECTORY = resolve(process.env.CLIPDOCK_DOWNLOADS_DIRECTORY || `${homedir()}/Downloads`);
+const MAX_DOWNLOAD_RECORDS = 10000;
 const instagramCaptures = new Map();
 let instagramChromeProcess = null;
 let shuttingDown = false;
+let downloadRecordsWrite = Promise.resolve();
 
 function boundedNumber(raw, fallback, min, max) {
   const value = Number(raw);
@@ -872,8 +877,233 @@ async function fetchMediaCandidate(candidate, outputPath, platform) {
 
 async function readJsonBody(req) {
   let body = '';
-  for await (const chunk of req) body += chunk;
+  for await (const chunk of req) {
+    body += chunk;
+    if (body.length > 64 * 1024) throw new Error('请求内容过大');
+  }
   return JSON.parse(body || '{}');
+}
+
+function recordString(value, limit = 500) {
+  return typeof value === 'string' ? value.trim().slice(0, limit) : '';
+}
+
+function recordUrl(value, field, required = true) {
+  const raw = recordString(value, 4096);
+  if (!raw && !required) return '';
+  if (!raw) throw new Error(`缺少${field}`);
+  return parseUrl(raw).href;
+}
+
+function emptyDownloadRecordStore() {
+  return { schemaVersion: 1, updatedAt: new Date().toISOString(), records: [] };
+}
+
+function sanitizeStoredDownloadRecord(record) {
+  if (!record || typeof record !== 'object') return null;
+  const id = recordString(record.id, 128);
+  const status = recordString(record.status, 20);
+  const sourceUrl = recordString(record.sourceUrl, 4096);
+  if (!/^[0-9a-f-]{36}$/i.test(id) || !['pending', 'completed', 'failed'].includes(status) || !sourceUrl) return null;
+  return {
+    id,
+    status,
+    platform: recordString(record.platform, 32) || 'unknown',
+    title: recordString(record.title, 500) || '未命名视频',
+    sourceUrl,
+    resolvedUrl: recordString(record.resolvedUrl, 4096) || null,
+    quality: recordString(record.quality, 40) || 'original',
+    filePath: recordString(record.filePath, 8192) || null,
+    fileName: recordString(record.fileName, 255) || null,
+    fileSizeBytes: Number.isSafeInteger(record.fileSizeBytes) && record.fileSizeBytes >= 0 ? record.fileSizeBytes : null,
+    fileExtension: recordString(record.fileExtension, 32) || null,
+    createdAt: recordString(record.createdAt, 64) || null,
+    completedAt: recordString(record.completedAt, 64) || null,
+    failedAt: recordString(record.failedAt, 64) || null,
+    error: recordString(record.error, 1000) || null,
+  };
+}
+
+async function readDownloadRecordStore() {
+  try {
+    const decoded = JSON.parse(await readFile(DOWNLOAD_RECORDS_PATH, 'utf8'));
+    const records = Array.isArray(decoded?.records)
+      ? decoded.records.map(sanitizeStoredDownloadRecord).filter(Boolean).slice(0, MAX_DOWNLOAD_RECORDS)
+      : [];
+    return {
+      schemaVersion: 1,
+      updatedAt: recordString(decoded?.updatedAt, 64) || new Date().toISOString(),
+      records,
+    };
+  } catch (error) {
+    if (error?.code === 'ENOENT') return emptyDownloadRecordStore();
+    throw new Error(`读取下载记录失败：${error.message || error}`);
+  }
+}
+
+async function writeDownloadRecordStore(store) {
+  await mkdir(dirname(DOWNLOAD_RECORDS_PATH), { recursive: true });
+  const temporaryPath = `${DOWNLOAD_RECORDS_PATH}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporaryPath, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
+    await rename(temporaryPath, DOWNLOAD_RECORDS_PATH);
+  } finally {
+    await rm(temporaryPath, { force: true }).catch(() => {});
+  }
+}
+
+function mutateDownloadRecords(mutator) {
+  const operation = downloadRecordsWrite.then(async () => {
+    const store = await readDownloadRecordStore();
+    const result = await mutator(store);
+    store.schemaVersion = 1;
+    store.updatedAt = new Date().toISOString();
+    store.records = store.records.slice(0, MAX_DOWNLOAD_RECORDS);
+    await writeDownloadRecordStore(store);
+    return result;
+  });
+  downloadRecordsWrite = operation.catch(() => {});
+  return operation;
+}
+
+async function completedDownloadRecords(status = 'completed', limit = MAX_DOWNLOAD_RECORDS) {
+  await downloadRecordsWrite;
+  const store = await readDownloadRecordStore();
+  const records = status === 'all' ? store.records : store.records.filter(record => record.status === status);
+  return {
+    schemaVersion: store.schemaVersion,
+    updatedAt: store.updatedAt,
+    records: records.slice(0, limit),
+  };
+}
+
+function downloadRecordFilePath(value) {
+  const filePath = recordString(value, 8192);
+  if (!filePath || !isAbsolute(filePath)) throw new Error('下载文件路径无效');
+  const resolvedPath = resolve(filePath);
+  const pathWithinDownloads = relative(DOWNLOADS_DIRECTORY, resolvedPath);
+  if (!pathWithinDownloads || pathWithinDownloads.startsWith('..') || isAbsolute(pathWithinDownloads)) {
+    throw new Error('下载文件必须位于下载文件夹中');
+  }
+  return resolvedPath;
+}
+
+async function handleDownloadRecordPrepare(req, res) {
+  try {
+    const request = await readJsonBody(req);
+    const sourceUrl = recordUrl(request.sourceUrl, '来源链接');
+    const resolvedUrl = recordUrl(request.resolvedUrl, '解析链接', false) || null;
+    const sourcePlatform = platformFor(new URL(sourceUrl));
+    const platform = recordString(request.platform, 32) || sourcePlatform;
+    const record = {
+      id: randomUUID(),
+      status: 'pending',
+      platform,
+      title: recordString(request.title, 500) || `${platform === 'unknown' ? '视频' : platform} 视频`,
+      sourceUrl,
+      resolvedUrl,
+      quality: recordString(request.quality, 40) || 'original',
+      filePath: null,
+      fileName: null,
+      fileSizeBytes: null,
+      fileExtension: null,
+      createdAt: new Date().toISOString(),
+      completedAt: null,
+      failedAt: null,
+      error: null,
+    };
+    await mutateDownloadRecords(store => {
+      store.records.unshift(record);
+      return record;
+    });
+    json(res, 201, { ok: true, record });
+  } catch (error) {
+    json(res, 400, { ok: false, error: error.message || '创建下载记录失败' });
+  }
+}
+
+async function handleDownloadRecordComplete(req, res) {
+  try {
+    const request = await readJsonBody(req);
+    const id = recordString(request.id, 128);
+    if (!/^[0-9a-f-]{36}$/i.test(id)) throw new Error('下载记录编号无效');
+    const filePath = downloadRecordFilePath(request.filePath);
+    const fileStat = await stat(filePath);
+    if (!fileStat.isFile() || fileStat.size <= 0) throw new Error('下载文件不存在或为空');
+    const record = await mutateDownloadRecords(store => {
+      const found = store.records.find(item => item.id === id);
+      if (!found) throw new Error('下载记录不存在');
+      found.status = 'completed';
+      found.filePath = filePath;
+      found.fileName = basename(filePath);
+      found.fileSizeBytes = fileStat.size;
+      found.fileExtension = extname(filePath).toLowerCase() || null;
+      found.completedAt = new Date().toISOString();
+      found.failedAt = null;
+      found.error = null;
+      return found;
+    });
+    json(res, 200, { ok: true, record });
+  } catch (error) {
+    const status = error.message === '下载记录不存在' ? 404 : 400;
+    json(res, status, { ok: false, error: error.message || '完成下载记录失败' });
+  }
+}
+
+async function markDownloadRecordFailed(id, errorMessage) {
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return null;
+  try {
+    return await mutateDownloadRecords(store => {
+      const found = store.records.find(item => item.id === id);
+      if (!found) return null;
+      if (found.status !== 'completed') {
+        found.status = 'failed';
+        found.failedAt = new Date().toISOString();
+        found.error = recordString(errorMessage, 1000) || '下载未完成';
+      }
+      return found;
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function handleDownloadRecordFailed(req, res) {
+  try {
+    const request = await readJsonBody(req);
+    const id = recordString(request.id, 128);
+    if (!/^[0-9a-f-]{36}$/i.test(id)) throw new Error('下载记录编号无效');
+    const record = await markDownloadRecordFailed(id, request.error);
+    if (!record) throw new Error('下载记录不存在');
+    json(res, 200, { ok: true, record });
+  } catch (error) {
+    const status = error.message === '下载记录不存在' ? 404 : 400;
+    json(res, status, { ok: false, error: error.message || '更新下载记录失败' });
+  }
+}
+
+async function handleDownloadRecords(req, res, requestUrl) {
+  try {
+    const requestedStatus = recordString(requestUrl.searchParams.get('status'), 20) || 'completed';
+    if (!['all', 'pending', 'completed', 'failed'].includes(requestedStatus)) throw new Error('记录状态无效');
+    const requestedLimit = Number(requestUrl.searchParams.get('limit') || MAX_DOWNLOAD_RECORDS);
+    const limit = Number.isFinite(requestedLimit) ? Math.min(MAX_DOWNLOAD_RECORDS, Math.max(1, Math.floor(requestedLimit))) : MAX_DOWNLOAD_RECORDS;
+    json(res, 200, { ok: true, ...(await completedDownloadRecords(requestedStatus, limit)) });
+  } catch (error) {
+    json(res, 400, { ok: false, error: error.message || '读取下载记录失败' });
+  }
+}
+
+async function handleDownloadRecordsClear(_req, res) {
+  try {
+    await mutateDownloadRecords(store => {
+      store.records = [];
+      return null;
+    });
+    json(res, 200, { ok: true });
+  } catch (error) {
+    json(res, 500, { ok: false, error: error.message || '清空下载记录失败' });
+  }
 }
 
 async function handleInstagramOpen(req, res) {
@@ -902,6 +1132,7 @@ async function handleInstagramCapture(req, res, requestUrl) {
 
 async function handleInstagramDownload(req, res, requestUrl) {
   let tempDir = null;
+  const recordId = recordString(requestUrl.searchParams.get('recordId'), 128);
   try {
     const id = String(requestUrl.searchParams.get('id') || '').trim();
     const session = instagramCaptures.get(id);
@@ -929,6 +1160,7 @@ async function handleInstagramDownload(req, res, requestUrl) {
     });
     await pipeline(createReadStream(outputPath), res);
   } catch (error) {
+    await markDownloadRecordFailed(recordId, error.message || 'Instagram 下载失败');
     if (res.headersSent) res.destroy(error);
     else json(res, 502, { ok: false, error: error.message || 'Instagram 下载失败' });
   } finally {
@@ -962,6 +1194,7 @@ async function handleTikTokCapture(req, res, requestUrl) {
 
 async function handleTikTokDownload(req, res, requestUrl) {
   let tempDir = null;
+  const recordId = recordString(requestUrl.searchParams.get('recordId'), 128);
   try {
     const id = String(requestUrl.searchParams.get('id') || '').trim();
     const session = instagramCaptures.get(id);
@@ -983,6 +1216,7 @@ async function handleTikTokDownload(req, res, requestUrl) {
     });
     await pipeline(createReadStream(inputPath), res);
   } catch (error) {
+    await markDownloadRecordFailed(recordId, error.message || 'TikTok 下载失败');
     if (res.headersSent) res.destroy(error);
     else json(res, 502, { ok: false, error: error.message || 'TikTok 下载失败' });
   } finally {
@@ -1096,7 +1330,9 @@ function safeAgentFileUrl(file) {
 }
 
 async function handleAgentDownload(req, res, requestUrl = null) {
+  const recordId = recordString(requestUrl?.searchParams.get('recordId'), 128);
   if (!CHANNELS_AGENT_ORIGIN) {
+    await markDownloadRecordFailed(recordId, '微信视频号桌面代理未配置');
     json(res, 503, { ok: false, error: '微信视频号桌面代理未配置，请先启动参考项目并设置 WX_CHANNELS_AGENT_ORIGIN' });
     return;
   }
@@ -1143,6 +1379,7 @@ async function handleAgentDownload(req, res, requestUrl = null) {
     for await (const chunk of upstream.body) res.write(chunk);
     res.end();
   } catch (error) {
+    await markDownloadRecordFailed(recordId, error.message || '桌面代理下载失败');
     json(res, 502, { ok: false, error: error.message || '桌面代理下载失败' });
   }
 }
@@ -1230,10 +1467,12 @@ async function handleParse(req, res) {
 }
 
 async function handleDownload(req, res, requestUrl) {
+  const recordId = recordString(requestUrl.searchParams.get('recordId'), 128);
   try {
     const raw = requestUrl.searchParams.get('url');
     const url = parseUrl(raw);
     if (!isDirectMedia(url)) {
+      await markDownloadRecordFailed(recordId, '此链接不是可直接下载的视频媒体地址');
       json(res, 422, { ok: false, error: '此链接是平台分享页，无法直接下载。请提供媒体直链。' });
       return;
     }
@@ -1253,6 +1492,7 @@ async function handleDownload(req, res, requestUrl) {
     for await (const chunk of upstream.body) res.write(chunk);
     res.end();
   } catch (error) {
+    await markDownloadRecordFailed(recordId, error.message || '下载失败');
     json(res, 502, { ok: false, error: error.message || '下载失败' });
   }
 }
@@ -1260,6 +1500,11 @@ async function handleDownload(req, res, requestUrl) {
 const mime = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml' };
 const server = http.createServer(async (req, res) => {
   const requestUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  if (req.method === 'POST' && requestUrl.pathname === '/api/download-records/prepare') return handleDownloadRecordPrepare(req, res);
+  if (req.method === 'POST' && requestUrl.pathname === '/api/download-records/complete') return handleDownloadRecordComplete(req, res);
+  if (req.method === 'POST' && requestUrl.pathname === '/api/download-records/failed') return handleDownloadRecordFailed(req, res);
+  if (req.method === 'GET' && requestUrl.pathname === '/api/download-records') return handleDownloadRecords(req, res, requestUrl);
+  if (req.method === 'DELETE' && requestUrl.pathname === '/api/download-records') return handleDownloadRecordsClear(req, res);
   if (req.method === 'POST' && requestUrl.pathname === '/api/parse') return handleParse(req, res);
   if ((req.method === 'POST' || req.method === 'GET') && requestUrl.pathname === '/api/agent/download') return handleAgentDownload(req, res, requestUrl);
   if (req.method === 'POST' && requestUrl.pathname === '/api/instagram/open') return handleInstagramOpen(req, res);

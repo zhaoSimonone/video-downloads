@@ -21,7 +21,7 @@
           <button class="nav-item" data-view="history"><span class="nav-icon">◷</span><span>下载记录</span><span class="nav-count" id="historyCount">0</span></button>
         </nav>
         <div class="sidebar-bottom">
-          <div class="privacy-note"><span class="status-dot"></span><div><strong>本地运行</strong><small>链接不会离开你的设备</small></div></div>
+          <div class="privacy-note"><span class="status-dot"></span><div><strong>本地运行</strong><small>记录仅保存在此设备</small></div></div>
           <div class="sidebar-version">v1.0.0 <span>·</span> MIT License</div>
         </div>
       </aside>
@@ -45,7 +45,7 @@
           </div>
         </section>
 
-        <section class="view hidden" id="historyView"><div class="page-intro compact-intro"><div><p class="eyebrow">DOWNLOAD LOG <span></span></p><h1>下载记录</h1><p class="intro-copy">最近处理过的链接会保存在当前浏览器中。</p></div><button class="ghost-button" id="clearHistory"><span>×</span> 清空记录</button></div><section class="panel history-panel"><div id="historyList" class="history-list"></div><div id="historyEmpty" class="history-empty"><div class="empty-glyph">◷</div><h3>还没有下载记录</h3><p>完成一次下载后，记录会出现在这里。</p></div></section></section>
+        <section class="view hidden" id="historyView"><div class="page-intro compact-intro"><div><p class="eyebrow">DOWNLOAD LOG <span></span></p><h1>下载记录</h1><p class="intro-copy">已完成的下载会以结构化 JSON 保存在本机，包含来源链接和实际文件路径。</p></div><div class="history-actions"><a class="ghost-button" href="clipdock://open-download-records">打开记录 JSON ↗</a><button class="ghost-button" id="clearHistory"><span>×</span> 清空记录</button></div></div><section class="panel history-panel"><div id="historyList" class="history-list"></div><div id="historyEmpty" class="history-empty"><div class="empty-glyph">◷</div><h3>还没有下载记录</h3><p>完成一次下载后，记录会出现在这里。</p></div></section></section>
 
         <section class="view hidden" id="compareView">
           <div class="page-intro compare-intro"><div><p class="eyebrow">VIDEO COMPARISON <span></span></p><h1>并排看清差异。</h1><p class="intro-copy">选择下载后的本地视频，最多同时比较 3 个版本。</p></div><button class="primary-button compare-add-button" type="button" id="compareAddButton"><span>＋</span><span>添加视频</span></button></div>
@@ -59,7 +59,7 @@
             <input id="compareFileInput" class="hidden" type="file" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm" multiple />
           </section>
         </section>
-        <footer class="footer"><span>ClipDock 是本地工具，不存储你的链接或视频。</span><span>仅限个人学习与获得授权的内容</span></footer>
+        <footer class="footer"><span>ClipDock 将完成下载的来源链接和文件路径保存在本机。</span><span>仅限个人学习与获得授权的内容</span></footer>
       </main>
     </div>
     <div class="toast" id="toast" role="status"></div>

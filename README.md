@@ -35,6 +35,24 @@ CLIPDOCK_SKIP_APP_BUILD=1 bash scripts/package_zip.sh
 
 应用内下载文件由 macOS 原生下载组件保存到 `~/Downloads/`，同名文件会自动追加编号。
 
+## 下载记录与自动化
+
+每次下载开始时，ClipDock 会创建一条待完成记录；只有 macOS 确认文件已经写入下载目录后，才会补全为 `completed`。记录以 JSON 保存在本机：
+
+```text
+~/Library/Application Support/ClipDock/download-records.json
+```
+
+每条完成记录包含 `platform`、`title`、`sourceUrl`（原始分享链接）、`resolvedUrl`、`quality`、`filePath`（实际落盘路径）、`fileName`、`fileSizeBytes` 和 `completedAt`。这份文件适合供后续批量上传脚本读取；应用内“下载记录”页面可直接在 Finder 中打开 JSON 文件或定位单个视频。
+
+当 ClipDock 正在运行时，也可通过本机接口读取完成记录：
+
+```bash
+curl http://127.0.0.1:3457/api/download-records
+```
+
+需要同时查看待完成或失败项时使用 `?status=all`。清空应用内记录只会清空 JSON 数据，不会删除已下载的视频文件。
+
 如果曾经直接关闭终端或强制退出，系统代理可能来不及自动恢复，表现为代理关闭后无法联网。此时先重新运行一次代理并使用 `Ctrl+C` 正常退出；也可以执行下面的恢复脚本。它只会关闭明确指向 `127.0.0.1:2023` 的代理，不会修改其他代理配置：
 
 ```bash
@@ -52,7 +70,7 @@ zsh scripts/restore-network-proxy.sh
 - Instagram Reel 支持通过独立 Chrome 登录会话捕获播放时产生的媒体请求
 - TikTok 视频支持通过独立 Chrome 登录会话捕获播放时产生的媒体请求
 - Instagram 捕获的视频会自动转换为 QuickTime 兼容的 H.264/AAC MP4，并保存为 `instagram-reel-compatible.mp4`
-- 下载记录保存在浏览器 `localStorage` 中
+- 下载记录以结构化 JSON 保存在本机，并在文件实际写入完成后更新实际路径和大小
 - 阻止本地网络地址，避免把下载接口作为 SSRF 代理
 
 平台分享页的解析受登录态、签名 URL 和平台策略影响。请仅下载自己拥有或获得授权使用的内容。

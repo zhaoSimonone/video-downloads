@@ -2,11 +2,25 @@ import { ComparePlayback } from './compare-playback.js';
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
-const state = { platform: 'douyin', result: null, history: JSON.parse(localStorage.getItem('clipdock-history') || '[]'), compareItems: [] };
+const state = { platform: 'douyin', result: null, history: [], compareItems: [] };
 
 function toast(message) { const el = $('#toast'); el.textContent = message; el.classList.add('show'); clearTimeout(window.__toast); window.__toast = setTimeout(() => el.classList.remove('show'), 3200); }
-function saveHistory() { localStorage.setItem('clipdock-history', JSON.stringify(state.history.slice(0, 20))); $('#historyCount').textContent = state.history.length; renderHistory(); renderRecentHistory(); }
 function platformName(platform) { return platform === 'channels' ? '微信视频号' : platform === 'douyin' ? '抖音' : platform === 'instagram' ? 'Instagram' : platform === 'tiktok' ? 'TikTok' : '未知平台'; }
+function formatRecordTime(value) { const date = new Date(value); return Number.isNaN(date.getTime()) ? '--' : date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }); }
+function formatFileSize(bytes) { if (!Number.isFinite(bytes) || bytes < 0) return '--'; if (bytes < 1024) return `${bytes} B`; if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`; return `${(bytes / 1024 ** 2).toFixed(1)} MB`; }
+async function loadHistory() {
+  try {
+    const response = await fetch('/api/download-records?status=completed');
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '读取下载记录失败');
+    state.history = Array.isArray(data.records) ? data.records : [];
+    renderHistory(); renderRecentHistory();
+  } catch (error) {
+    console.warn('Unable to load ClipDock download records:', error);
+    state.history = [];
+    renderHistory(); renderRecentHistory();
+  }
+}
 function setPlatform(platform) { state.platform = platform; $$('.platform-tab').forEach(tab => tab.classList.toggle('active', tab.dataset.platform === platform)); $('#urlInput').placeholder = platform === 'channels' ? '粘贴微信视频号链接…' : platform === 'instagram' ? '粘贴 Instagram Reel 链接…' : platform === 'tiktok' ? '粘贴 TikTok 视频链接…' : '粘贴抖音链接…'; $('#inputHint').textContent = platform === 'channels' ? '例如：https://channels.weixin.qq.com/…' : platform === 'instagram' ? '例如：https://www.instagram.com/reel/…' : platform === 'tiktok' ? '例如：https://www.tiktok.com/@…/video/…' : '例如：https://v.douyin.com/…'; }
 function renderResult(result) {
   state.result = result; if (result.platform) setPlatform(result.platform); $('#emptyState').classList.add('hidden'); $('#resultContent').classList.remove('hidden');
@@ -17,18 +31,20 @@ function renderResult(result) {
   $('#queueStatus').textContent = result.direct || result.capturedId ? '可下载' : result.agentJobId ? '代理已就绪' : result.captureId ? '等待捕获' : '需捕获';
 }
 function renderHistory() {
-  $('#historyCount').textContent = state.history.length; $('#historyEmpty').classList.toggle('hidden', state.history.length > 0); $('#historyList').innerHTML = state.history.map(item => `<a class="history-entry" href="${historyFileHref(item)}"><span class="history-platform ${historyPlatformClass(item.platform)}">${historyPlatformIcon(item.platform)}</span><div class="history-meta"><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.source)} · ${item.time}</small></div><span class="history-state">${item.filename ? '定位文件' : '打开目录'} ↗</span></a>`).join('');
+  $('#historyCount').textContent = state.history.length;
+  $('#historyEmpty').classList.toggle('hidden', state.history.length > 0);
+  $('#historyList').innerHTML = state.history.map(item => `<a class="history-entry" href="${historyFileHref(item)}" title="${escapeHtml(item.filePath || '')}"><span class="history-platform ${historyPlatformClass(item.platform)}">${historyPlatformIcon(item.platform)}</span><div class="history-meta"><strong>${escapeHtml(item.title)}</strong><small class="history-source">${escapeHtml(item.sourceUrl)}</small><small>${escapeHtml(historyDetails(item))}</small></div><span class="history-state">定位文件 ↗</span></a>`).join('');
 }
-function historyFileHref(item) { return item.filename ? `clipdock://reveal-download?name=${encodeURIComponent(item.filename)}` : 'clipdock://open-downloads'; }
+function historyFileHref(item) { return item.filePath ? `clipdock://reveal-download?path=${encodeURIComponent(item.filePath)}` : 'clipdock://open-downloads'; }
 function historyPlatformClass(platform) { return platform === 'channels' ? 'channels-logo' : platform === 'instagram' ? 'instagram-logo' : platform === 'tiktok' ? 'tiktok-logo' : 'douyin-logo'; }
 function historyPlatformIcon(platform) { return platform === 'channels' ? '◉' : platform === 'instagram' ? '◎' : platform === 'tiktok' ? '♪' : '♪'; }
 function renderRecentHistory() {
   const list = $('#recentHistoryList'); const empty = $('#recentHistoryEmpty'); if (!list || !empty) return;
   const entries = state.history.slice(0, 3); empty.classList.toggle('hidden', entries.length > 0);
-  list.innerHTML = entries.map(item => `<a class="recent-entry" href="${historyFileHref(item)}"><span class="history-platform ${historyPlatformClass(item.platform)}">${historyPlatformIcon(item.platform)}</span><span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.time)} · ${item.filename ? '定位下载文件' : '打开下载目录'} ↗</small></span></a>`).join('');
+  list.innerHTML = entries.map(item => `<a class="recent-entry" href="${historyFileHref(item)}"><span class="history-platform ${historyPlatformClass(item.platform)}">${historyPlatformIcon(item.platform)}</span><span><strong>${escapeHtml(item.title)}</strong><small>${formatRecordTime(item.completedAt)} · ${formatFileSize(item.fileSizeBytes)} · 定位文件 ↗</small></span></a>`).join('');
 }
 function escapeHtml(value) { return String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
-function addHistory(result, filename = '') { state.history.unshift({ title: result.title, source: result.source, platform: result.platform, filename, time: new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) }); saveHistory(); }
+function historyDetails(item) { return `${formatRecordTime(item.completedAt)} · ${formatFileSize(item.fileSizeBytes)} · ${item.filePath || '--'}`; }
 
 const compareStage = $('#compareStage');
 const compareFileInput = $('#compareFileInput');
@@ -194,21 +210,63 @@ $('#captureButton').addEventListener('click', async () => {
   }
 });
 
+async function prepareDownloadRecord(result) {
+  const response = await fetch('/api/download-records/prepare', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      platform: result.platform,
+      title: result.title,
+      sourceUrl: result.pageSource || result.source,
+      resolvedUrl: result.source,
+      quality: $('#qualitySelect').value,
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok || !data.record?.id) throw new Error(data.error || '无法创建下载记录');
+  return data.record;
+}
+
+async function pollDownloadRecord(recordId) {
+  for (let attempt = 0; attempt < 180; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    try {
+      const response = await fetch('/api/download-records?status=all&limit=10000');
+      const data = await response.json();
+      const record = data.records?.find(item => item.id === recordId);
+      if (!record || record.status === 'pending') continue;
+      if (record.status === 'completed') {
+        await loadHistory();
+        $('#queueStatus').textContent = '已完成';
+        toast(`下载完成：${record.fileName}`);
+      } else {
+        $('#queueStatus').textContent = '下载失败';
+        toast(record.error || '下载未能完成');
+      }
+      return;
+    } catch {
+      // The server may be temporarily busy while the native download finishes.
+    }
+  }
+  $('#queueStatus').textContent = '等待确认';
+}
+
 $('#downloadButton').addEventListener('click', async () => {
   if (!state.result?.direct && !state.result?.agentJobId && !state.result?.capturedId) return toast('分享页无法直接下载，请先捕获视频或提供媒体直链'); const button = $('#downloadButton'); button.disabled = true; button.querySelector('span:last-child').textContent = '准备文件…'; $('#queueStatus').textContent = '下载中';
   try {
     const filename = state.result.capturedId ? `${state.result.platform === 'tiktok' ? 'tiktok-video' : 'instagram-reel'}-${new Date().toISOString().replace(/[-:TZ.]/g, '').slice(0, 14)}.mp4` : '';
+    const record = await prepareDownloadRecord(state.result);
     const downloadUrl = state.result.capturedId
-      ? `/api/${state.result.platform}/download?id=${encodeURIComponent(state.result.capturedId)}&filename=${encodeURIComponent(filename)}`
+      ? `/api/${state.result.platform}/download?id=${encodeURIComponent(state.result.capturedId)}&filename=${encodeURIComponent(filename)}&recordId=${encodeURIComponent(record.id)}`
       : state.result.agentJobId
-      ? `/api/agent/download?jobId=${encodeURIComponent(state.result.agentJobId)}&filename=${encodeURIComponent(state.result.title)}`
-      : `/api/download?url=${encodeURIComponent(state.result.source)}`;
+      ? `/api/agent/download?jobId=${encodeURIComponent(state.result.agentJobId)}&filename=${encodeURIComponent(state.result.title)}&recordId=${encodeURIComponent(record.id)}`
+      : `/api/download?url=${encodeURIComponent(state.result.source)}&recordId=${encodeURIComponent(record.id)}`;
     // Let the browser/WKWebView handle Content-Disposition so macOS writes a
     // real file instead of keeping the response inside a Blob URL.
     window.location.assign(downloadUrl);
-    addHistory(state.result, filename);
-    toast(state.result.capturedId ? '正在生成 QuickTime 兼容文件，随后保存到“下载”文件夹' : '下载已开始，请在“下载”文件夹查看');
-    $('#queueStatus').textContent = state.result.capturedId ? '转换中' : '已完成';
+    void pollDownloadRecord(record.id);
+    toast(state.result.capturedId ? '正在生成 QuickTime 兼容文件，完成后会记录实际文件路径' : '下载已开始，文件写入后会自动记录');
+    $('#queueStatus').textContent = state.result.capturedId ? '转换中' : '等待写入';
   } catch (error) { toast(error.message || '下载失败'); $('#queueStatus').textContent = state.result.agentJobId ? '代理已就绪' : state.result.capturedId ? '已捕获' : '可下载'; } finally { button.disabled = false; button.querySelector('span:last-child').textContent = state.result.agentJobId ? '下载到本地' : '下载视频'; }
 });
 
@@ -222,7 +280,18 @@ function downloadFilename(contentDisposition) {
 
 $$('.nav-item').forEach(item => item.addEventListener('click', () => { const view = item.dataset.view; $$('.nav-item').forEach(nav => nav.classList.toggle('active', nav === item)); $('#downloaderView').classList.toggle('hidden', view !== 'downloader'); $('#historyView').classList.toggle('hidden', view !== 'history'); $('#compareView').classList.toggle('hidden', view !== 'compare'); $('#pageTitle').textContent = view === 'history' ? '下载记录' : view === 'compare' ? '视频对比' : '下载器'; }));
 $('#openHistory').addEventListener('click', () => { document.querySelector('.nav-item[data-view="history"]').click(); });
-$('#clearHistory').addEventListener('click', () => { state.history = []; saveHistory(); toast('已清空下载记录'); });
+$('#clearHistory').addEventListener('click', async () => {
+  try {
+    const response = await fetch('/api/download-records', { method: 'DELETE' });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '清空下载记录失败');
+    state.history = [];
+    renderHistory(); renderRecentHistory();
+    toast('已清空下载记录');
+  } catch (error) {
+    toast(error.message || '清空下载记录失败');
+  }
+});
 document.addEventListener('keydown', async event => {
   const input = $('#urlInput');
   const modifier = event.metaKey || event.ctrlKey;
@@ -247,4 +316,4 @@ document.addEventListener('keydown', async event => {
     try { await navigator.clipboard.writeText(input.value.slice(input.selectionStart, input.selectionEnd)); } catch { document.execCommand('copy'); }
   }
 });
-renderHistory(); renderRecentHistory(); setPlatform('douyin');
+renderHistory(); renderRecentHistory(); void loadHistory(); setPlatform('douyin');
