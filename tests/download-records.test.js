@@ -91,6 +91,7 @@ test('completed downloads are durably recorded with source URL and actual file p
 
   const listed = await request(`${baseUrl}/api/download-records`);
   assert.equal(listed.response.status, 200);
+  assert.equal(listed.body.storagePath, recordsPath);
   assert.equal(listed.body.records.length, 1);
   assert.deepEqual(listed.body.records[0], completed.body.record);
 

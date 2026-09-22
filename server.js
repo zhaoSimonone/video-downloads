@@ -973,6 +973,7 @@ async function completedDownloadRecords(status = 'completed', limit = MAX_DOWNLO
   return {
     schemaVersion: store.schemaVersion,
     updatedAt: store.updatedAt,
+    storagePath: DOWNLOAD_RECORDS_PATH,
     records: records.slice(0, limit),
   };
 }

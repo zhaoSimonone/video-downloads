@@ -2,7 +2,7 @@ import { ComparePlayback } from './compare-playback.js';
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
-const state = { platform: 'douyin', result: null, history: [], compareItems: [] };
+const state = { platform: 'douyin', result: null, history: [], historyStoragePath: '', compareItems: [] };
 
 function toast(message) { const el = $('#toast'); el.textContent = message; el.classList.add('show'); clearTimeout(window.__toast); window.__toast = setTimeout(() => el.classList.remove('show'), 3200); }
 function platformName(platform) { return platform === 'channels' ? '微信视频号' : platform === 'douyin' ? '抖音' : platform === 'instagram' ? 'Instagram' : platform === 'tiktok' ? 'TikTok' : '未知平台'; }
@@ -14,10 +14,12 @@ async function loadHistory() {
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || '读取下载记录失败');
     state.history = Array.isArray(data.records) ? data.records : [];
+    state.historyStoragePath = data.storagePath || '';
     renderHistory(); renderRecentHistory();
   } catch (error) {
     console.warn('Unable to load ClipDock download records:', error);
     state.history = [];
+    state.historyStoragePath = '';
     renderHistory(); renderRecentHistory();
   }
 }
@@ -33,6 +35,8 @@ function renderResult(result) {
 function renderHistory() {
   $('#historyCount').textContent = state.history.length;
   $('#historyEmpty').classList.toggle('hidden', state.history.length > 0);
+  const storagePath = $('#historyStoragePath');
+  if (storagePath) storagePath.textContent = state.historyStoragePath || '应用数据目录中的 download-records.json';
   $('#historyList').innerHTML = state.history.map(item => `<a class="history-entry" href="${historyFileHref(item)}" title="${escapeHtml(item.filePath || '')}"><span class="history-platform ${historyPlatformClass(item.platform)}">${historyPlatformIcon(item.platform)}</span><div class="history-meta"><strong>${escapeHtml(item.title)}</strong><small class="history-source">${escapeHtml(item.sourceUrl)}</small><small>${escapeHtml(historyDetails(item))}</small></div><span class="history-state">定位文件 ↗</span></a>`).join('');
 }
 function historyFileHref(item) { return item.filePath ? `clipdock://reveal-download?path=${encodeURIComponent(item.filePath)}` : 'clipdock://open-downloads'; }
