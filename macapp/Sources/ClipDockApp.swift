@@ -199,9 +199,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         guard window?.isKeyWindow == true else { return event }
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         guard modifiers.contains(.command) || modifiers.contains(.control) else { return event }
-        guard let key = event.charactersIgnoringModifiers?.lowercased(), key == "v" || key == "c" || key == "q" else { return event }
+        guard let key = event.charactersIgnoringModifiers?.lowercased(), key == "a" || key == "v" || key == "c" || key == "q" else { return event }
         if key == "q" {
             NSApp.terminate(nil)
+            return nil
+        }
+        if key == "a" {
+            webView.evaluateJavaScript("""
+            (() => { const input = document.getElementById('urlInput'); if (!input || document.activeElement !== input) return; input.select(); })();
+            """)
             return nil
         }
         if key == "v" {

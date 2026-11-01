@@ -14,6 +14,7 @@ const publicDir = new URL('./public/', import.meta.url);
 const CHANNELS_AGENT_ORIGIN = normalizeChannelsAgentOrigin(process.env.WX_CHANNELS_AGENT_ORIGIN || '');
 const AGENT_REQUEST_TIMEOUT_MS = boundedNumber(process.env.WX_CHANNELS_AGENT_TIMEOUT_MS, 3000, 500, 15000);
 const AGENT_JOB_TIMEOUT_MS = boundedNumber(process.env.WX_CHANNELS_AGENT_JOB_TIMEOUT_MS, 120000, 5000, 600000);
+const AGENT_RECORD_SYNC_INTERVAL_MS = boundedNumber(process.env.WX_CHANNELS_AGENT_RECORD_SYNC_INTERVAL_MS, 5000, 1000, 60000);
 const INSTAGRAM_CAPTURE_TIMEOUT_MS = boundedNumber(process.env.INSTAGRAM_CAPTURE_TIMEOUT_MS, 120000, 15000, 600000);
 const INSTAGRAM_CDP_PORT = boundedNumber(process.env.INSTAGRAM_CDP_PORT, 9222, 1024, 65535);
 const INSTAGRAM_TRANSCODE_TIMEOUT_MS = boundedNumber(process.env.INSTAGRAM_TRANSCODE_TIMEOUT_MS, 600000, 30000, 1800000);
@@ -25,6 +26,8 @@ const instagramCaptures = new Map();
 let instagramChromeProcess = null;
 let shuttingDown = false;
 let downloadRecordsWrite = Promise.resolve();
+let agentRecordSyncInFlight = null;
+let agentRecordSyncTimer = null;
 
 function boundedNumber(raw, fallback, min, max) {
   const value = Number(raw);
@@ -888,6 +891,10 @@ function recordString(value, limit = 500) {
   return typeof value === 'string' ? value.trim().slice(0, limit) : '';
 }
 
+function recordIdentifier(value, limit = 300) {
+  return value === null || value === undefined ? '' : recordString(String(value), limit);
+}
+
 function recordUrl(value, field, required = true) {
   const raw = recordString(value, 4096);
   if (!raw && !required) return '';
@@ -909,9 +916,12 @@ function sanitizeStoredDownloadRecord(record) {
     id,
     status,
     platform: recordString(record.platform, 32) || 'unknown',
+    origin: recordString(record.origin, 40) || 'clipdock',
+    externalId: recordString(record.externalId, 300) || null,
     title: recordString(record.title, 500) || '未命名视频',
     sourceUrl,
     resolvedUrl: recordString(record.resolvedUrl, 4096) || null,
+    downloadUrl: recordString(record.downloadUrl, 8192) || null,
     quality: recordString(record.quality, 40) || 'original',
     filePath: recordString(record.filePath, 8192) || null,
     fileName: recordString(record.fileName, 255) || null,
@@ -978,6 +988,106 @@ async function completedDownloadRecords(status = 'completed', limit = MAX_DOWNLO
   };
 }
 
+function agentDate(value, fallback = new Date()) {
+  const number = Number(value);
+  if (Number.isFinite(number) && number > 0) {
+    const milliseconds = number < 100000000000 ? number * 1000 : number;
+    const date = new Date(milliseconds);
+    if (!Number.isNaN(date.getTime())) return date.toISOString();
+  }
+  const parsed = new Date(String(value || ''));
+  return Number.isNaN(parsed.getTime()) ? fallback.toISOString() : parsed.toISOString();
+}
+
+function isCompletedAgentDownload(task) {
+  const status = Number(task?.status);
+  return status === 5 || ['completed', 'finished', 'success', 'succeeded'].includes(recordString(task?.status, 40).toLowerCase());
+}
+
+function agentDownloadSpec(task) {
+  try {
+    const config = JSON.parse(String(task?.config_json || '{}'));
+    return recordString(config.spec, 40) || 'original';
+  } catch {
+    return 'original';
+  }
+}
+
+function agentHttpUrl(value) {
+  const raw = recordString(value, 8192);
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    return ['http:', 'https:'].includes(url.protocol) ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+async function syncChannelsAgentDownloadRecords() {
+  if (!CHANNELS_AGENT_ORIGIN || agentRecordSyncInFlight) return agentRecordSyncInFlight || 0;
+  agentRecordSyncInFlight = (async () => {
+    try {
+      const payload = await requestChannelsAgent('/api/v1/download_task/list?page=1&page_size=100', { timeout: 10000 });
+      const tasks = Array.isArray(payload?.list) ? payload.list : Array.isArray(payload) ? payload : [];
+      const candidates = [];
+      for (const task of tasks) {
+        if (!isCompletedAgentDownload(task)) continue;
+        const platform = recordString(task?.platform_id, 40).toLowerCase();
+        if (platform && platform !== 'wxchannels') continue;
+        const sourceUrl = agentHttpUrl(task?.source_url || task?.sourceUrl || task?.page_url);
+        const downloadUrl = agentHttpUrl(task?.url || task?.download_url || task?.downloadUrl);
+        if (!sourceUrl || !downloadUrl) continue;
+        const files = Array.isArray(task?.files) ? task.files : [];
+        const file = files.find(item => ['finished', 'completed', 'success'].includes(recordString(item?.status, 40).toLowerCase()) && recordString(item?.file_path || item?.filePath, 8192));
+        if (!file) continue;
+        const filePath = resolve(recordString(file.file_path || file.filePath, 8192));
+        let fileStat;
+        try { fileStat = await stat(filePath); } catch { continue; }
+        if (!fileStat.isFile() || fileStat.size <= 0) continue;
+        const externalId = `wxchannels:${recordIdentifier(task?.id, 80)}:${recordIdentifier(file?.id || filePath, 180)}`;
+        candidates.push({
+          externalId,
+          platform: 'channels',
+          origin: 'wxchannels-agent',
+          title: recordString(task?.name, 500) || '微信视频号视频',
+          sourceUrl,
+          resolvedUrl: downloadUrl,
+          downloadUrl,
+          quality: agentDownloadSpec(task),
+          filePath,
+          fileName: basename(filePath),
+          fileSizeBytes: fileStat.size,
+          fileExtension: extname(filePath).toLowerCase() || null,
+          createdAt: agentDate(task?.created_at || task?.createdAt),
+          completedAt: agentDate(task?.updated_at || task?.updatedAt || task?.created_at || task?.createdAt),
+        });
+      }
+      if (!candidates.length) return 0;
+      return await mutateDownloadRecords(store => {
+        store.records = store.records.filter(item => item.externalId !== 'wxchannels::');
+        let changed = 0;
+        for (const candidate of candidates) {
+          const existing = store.records.find(item => item.externalId === candidate.externalId);
+          if (existing) {
+            Object.assign(existing, candidate, { id: existing.id, status: 'completed', failedAt: null, error: null });
+          } else {
+            store.records.unshift({ id: randomUUID(), status: 'completed', failedAt: null, error: null, ...candidate });
+          }
+          changed += 1;
+        }
+        return changed;
+      });
+    } catch (error) {
+      if (process.env.CLIPDOCK_DEBUG === '1') console.warn(`同步视频号下载记录失败：${error.message || error}`);
+      return 0;
+    } finally {
+      agentRecordSyncInFlight = null;
+    }
+  })();
+  return agentRecordSyncInFlight;
+}
+
 function downloadRecordFilePath(value) {
   const filePath = recordString(value, 8192);
   if (!filePath || !isAbsolute(filePath)) throw new Error('下载文件路径无效');
@@ -999,10 +1109,13 @@ async function handleDownloadRecordPrepare(req, res) {
     const record = {
       id: randomUUID(),
       status: 'pending',
+      origin: 'clipdock',
+      externalId: null,
       platform,
       title: recordString(request.title, 500) || `${platform === 'unknown' ? '视频' : platform} 视频`,
       sourceUrl,
       resolvedUrl,
+      downloadUrl: recordUrl(request.downloadUrl, '下载链接', false) || null,
       quality: recordString(request.quality, 40) || 'original',
       filePath: null,
       fileName: null,
@@ -1085,6 +1198,7 @@ async function handleDownloadRecordFailed(req, res) {
 
 async function handleDownloadRecords(req, res, requestUrl) {
   try {
+    await syncChannelsAgentDownloadRecords();
     const requestedStatus = recordString(requestUrl.searchParams.get('status'), 20) || 'completed';
     if (!['all', 'pending', 'completed', 'failed'].includes(requestedStatus)) throw new Error('记录状态无效');
     const requestedLimit = Number(requestUrl.searchParams.get('limit') || MAX_DOWNLOAD_RECORDS);
@@ -1505,6 +1619,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'POST' && requestUrl.pathname === '/api/download-records/complete') return handleDownloadRecordComplete(req, res);
   if (req.method === 'POST' && requestUrl.pathname === '/api/download-records/failed') return handleDownloadRecordFailed(req, res);
   if (req.method === 'GET' && requestUrl.pathname === '/api/download-records') return handleDownloadRecords(req, res, requestUrl);
+  if (req.method === 'POST' && requestUrl.pathname === '/api/download-records/sync-agent') return handleDownloadRecords(req, res, new URL('?status=all', requestUrl));
   if (req.method === 'DELETE' && requestUrl.pathname === '/api/download-records') return handleDownloadRecordsClear(req, res);
   if (req.method === 'POST' && requestUrl.pathname === '/api/parse') return handleParse(req, res);
   if ((req.method === 'POST' || req.method === 'GET') && requestUrl.pathname === '/api/agent/download') return handleAgentDownload(req, res, requestUrl);
@@ -1528,7 +1643,14 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, '127.0.0.1', () => console.log(`ClipDock running at http://localhost:${PORT}`));
+server.listen(PORT, '127.0.0.1', () => {
+  console.log(`ClipDock running at http://localhost:${PORT}`);
+  if (CHANNELS_AGENT_ORIGIN) {
+    void syncChannelsAgentDownloadRecords();
+    agentRecordSyncTimer = setInterval(() => { void syncChannelsAgentDownloadRecords(); }, AGENT_RECORD_SYNC_INTERVAL_MS);
+    agentRecordSyncTimer.unref?.();
+  }
+});
 
 async function shutdown() {
   if (shuttingDown) return;
@@ -1541,6 +1663,8 @@ async function shutdown() {
     instagramChromeProcess.kill('SIGTERM');
     instagramChromeProcess = null;
   }
+  if (agentRecordSyncTimer) clearInterval(agentRecordSyncTimer);
+  agentRecordSyncTimer = null;
   await new Promise(resolve => server.close(resolve));
 }
 

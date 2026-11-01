@@ -43,7 +43,9 @@ CLIPDOCK_SKIP_APP_BUILD=1 bash scripts/package_zip.sh
 ~/Library/Application Support/ClipDock/download-records.json
 ```
 
-每条完成记录包含 `platform`、`title`、`sourceUrl`（原始分享链接）、`resolvedUrl`、`quality`、`filePath`（实际落盘路径）、`fileName`、`fileSizeBytes` 和 `completedAt`。这份文件适合供后续批量上传脚本读取；应用内“下载记录”页面可直接在 Finder 中打开 JSON 文件或定位单个视频。
+每条完成记录包含 `platform`、`title`、`sourceUrl`（原始分享链接）、`resolvedUrl`、`downloadUrl`（解析到的实际视频下载地址）、`quality`、`filePath`（实际落盘路径）、`fileName`、`fileSizeBytes` 和 `completedAt`。这份文件适合供后续批量上传脚本读取；应用内“下载记录”页面可直接在 Finder 中打开 JSON 文件或定位单个视频。
+
+微信视频号页面右上角由桌面代理注入的下载按钮也会被 ClipDock 定时同步。代理任务中的来源页面、临时视频地址和已完成本地文件会写入同一份记录；`origin` 为 `wxchannels-agent`，`externalId` 用于防止同一个代理任务重复记录。临时视频地址可能会过期，但会保留在记录中便于追溯。
 
 当 ClipDock 正在运行时，也可通过本机接口读取完成记录：
 

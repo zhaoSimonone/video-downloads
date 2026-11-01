@@ -223,6 +223,7 @@ async function prepareDownloadRecord(result) {
       title: result.title,
       sourceUrl: result.pageSource || result.source,
       resolvedUrl: result.source,
+      downloadUrl: result.direct ? result.source : null,
       quality: $('#qualitySelect').value,
     }),
   });
@@ -299,9 +300,12 @@ $('#clearHistory').addEventListener('click', async () => {
 document.addEventListener('keydown', async event => {
   const input = $('#urlInput');
   const modifier = event.metaKey || event.ctrlKey;
-  if (!modifier) return;
+  if (!modifier || document.activeElement !== input) return;
   const key = event.key.toLowerCase();
-  if (key === 'v') {
+  if (key === 'a') {
+    event.preventDefault();
+    input.select();
+  } else if (key === 'v') {
     event.preventDefault();
     try {
       const text = await navigator.clipboard.readText();
@@ -315,7 +319,7 @@ document.addEventListener('keydown', async event => {
     } catch {
       input.focus();
     }
-  } else if (key === 'c' && document.activeElement === input && input.selectionStart !== input.selectionEnd) {
+  } else if (key === 'c' && input.selectionStart !== input.selectionEnd) {
     event.preventDefault();
     try { await navigator.clipboard.writeText(input.value.slice(input.selectionStart, input.selectionEnd)); } catch { document.execCommand('copy'); }
   }
